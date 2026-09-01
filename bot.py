@@ -35,6 +35,14 @@ lock=asyncio.Lock()
 session=None
 started=set()
 
+FREE_SESSIONS=[
+    "🛍️ Offre sur article",
+    "🔗 2 liens",
+    "👗 Dressing",
+    "👗 Article",
+]
+last_free_session=None
+
 SESSION_IMAGES = {
     "🌙 Nocturne": ("NOCTURNE.jpg", "ARRÊTE NOCTURNE.jpg"),
     "☕ Petit déjeuner": ("PETIT DEJEUNER.jpg", "ARRÊTE LE PETIT DEJEUNER.jpg"),
@@ -123,6 +131,24 @@ FIXED=[
 ("🍽️ Repas",time(19,0),time(19,30),"normal"),
 ("🚀 Méga Boost",time(21,0),time(21,30),"mega")]
 
+def fixed_window(t):
+    for name,st,et,kind in FIXED:
+        a=datetime.combine(t.date(),st,tzinfo=TIMEZONE)
+        b=datetime.combine(t.date(),et,tzinfo=TIMEZONE)
+        if a<=t<b:
+            return name,a,b,kind
+    return None
+
+def next_fixed_start(t):
+    starts=[]
+    for day_add in (0,1):
+        day=t.date()+timedelta(days=day_add)
+        for name,st,et,kind in FIXED:
+            a=datetime.combine(day,st,tzinfo=TIMEZONE)
+            if a>t:
+                starts.append(a)
+    return min(starts) if starts else None
+
 async def begin(name,a,b,kind):
     global session
     if session:return False
@@ -134,7 +160,14 @@ async def begin(name,a,b,kind):
         if d: await d.send(f"@everyone 🚀 **{name} commence !**")
     await send_session_image(ch,name,True)
     txt=f"✨ **{name}**\n⏰ Fin : **{b:%H:%M}**\n"
-    txt+=("🚫 Aucun bonus 🎁 🎀 👑 💎 pendant le Méga Boost." if kind=="mega" else "🔗 1 lien normal par membre.")
+    if kind=="mega":
+        txt+="🚫 Aucun bonus 🎁 🎀 👑 💎 pendant le Méga Boost."
+    elif name=="👗 Dressing":
+        nb_articles=random.randint(3,10)
+        session["dressing_articles"]=nb_articles
+        txt+=f"👗 **{nb_articles} articles** à favoriser dans le dressing."
+    else:
+        txt+="🔗 1 lien normal par membre."
     await ch.send(txt)
     return True
 
@@ -160,41 +193,61 @@ async def finish():
         if ch:await ch.send("🎉 **Résultats Méga Boost**\n"+"\n".join(lines))
     session=None
 
+async def launch_free(t):
+    global last_free_session
+    choices=[x for x in FREE_SESSIONS if x!=last_free_session] or FREE_SESSIONS[:]
+    name=random.choice(choices)
+    end=t+timedelta(minutes=10)
+    nf=next_fixed_start(t)
+    if nf and nf<end:
+        end=nf
+    if end<=t+timedelta(seconds=30):
+        return False
+    ok=await begin(name,t,end,"free")
+    if ok:
+        last_free_session=name
+    return ok
+
 @tasks.loop(seconds=20)
 async def scheduler():
     global session
     t=now()
-    if session and t>=session["end"]:await finish()
-    if session:return
-    for name,st,et,kind in FIXED:
-        a=datetime.combine(t.date(),st,tzinfo=TIMEZONE); b=datetime.combine(t.date(),et,tzinfo=TIMEZONE)
-        if a<=t<b:
-            k=f"{t.date()}-{st}-{name}"
 
-            # Sécurité anti-double lancement persistante :
-            # le claim est écrit dans /app/data avant l'envoi de la session.
-            # Il survit donc aux redémarrages / redéploiements Railway.
+    if session and t>=session["end"]:
+        await finish()
+
+    fw=fixed_window(t)
+    if fw:
+        name,a,b,kind=fw
+        if session:
+            if session["kind"]=="free":
+                await finish()
+            else:
+                return
+
+        k=f"{t.date()}-{a.time()}-{name}"
+        async with lock:
+            claims=DATA.setdefault("session_claims",[])
+            if k in claims:
+                return
+            claims.append(k)
+            if len(claims)>100:
+                del claims[:-100]
+            save()
+
+        started.add(k)
+        ok=await begin(name,a,b,kind)
+        if not ok:
             async with lock:
                 claims=DATA.setdefault("session_claims",[])
                 if k in claims:
-                    return
-                claims.append(k)
-                # On ne garde que les claims récents pour éviter que le fichier grossisse.
-                if len(claims)>100:
-                    del claims[:-100]
-                save()
+                    claims.remove(k)
+                    save()
+            started.discard(k)
+        return
 
-            started.add(k)
-            ok=await begin(name,a,b,kind)
-            if not ok:
-                # Si Lady n'a réellement pas pu démarrer, on libère le claim.
-                async with lock:
-                    claims=DATA.setdefault("session_claims",[])
-                    if k in claims:
-                        claims.remove(k)
-                        save()
-                started.discard(k)
-            return
+    if not session:
+        await launch_free(t)
 
 @scheduler.before_loop
 async def wait():await bot.wait_until_ready()
