@@ -18,7 +18,7 @@ ROLE_ROUGE="Supprimer"
 SEUIL_SEMAINE=6
 
 BASE_DIR=Path(__file__).resolve().parent
-IMAGES_DIR=BASE_DIR/"images"
+IMAGES_DIR=BASE_DIR
 
 DATA_DIR=Path(os.environ.get("RAILWAY_VOLUME_MOUNT_PATH","/app/data"))
 DATA_DIR.mkdir(parents=True,exist_ok=True)
@@ -36,12 +36,15 @@ session=None
 started=set()
 
 SESSION_IMAGES = {
-    "🌙 Nocturne": ("nocturne_debut.jpeg", "nocturne_stop.jpeg"),
-    "☕ Petit déjeuner": ("petit_dejeuner_debut.jpeg", "petit_dejeuner_stop.jpeg"),
-    "🍹 Apéro": ("apero_debut.jpeg", "apero_stop.jpeg"),
-    "🚀 Méga Boost": ("mega_debut.jpeg", "mega_stop.jpeg"),
-    "🛍️ Offre sur article": ("offre_debut.jpeg", "offre_stop.jpeg"),
-    "👗 Article": ("article_debut.jpeg", None),
+    "🌙 Nocturne": ("NOCTURNE.jpg", "ARRÊTE NOCTURNE.jpg"),
+    "☕ Petit déjeuner": ("PETIT DEJEUNER.jpg", "ARRÊTE LE PETIT DEJEUNER.jpg"),
+    "🍹 Apéro": ("APERO.jpg", "APERO STOP.jpg"),
+    "🍽️ Repas": ("REPAS.jpg", "REPAS STOP.jpg"),
+    "🚀 Méga Boost": ("MEGA BOOST.jpg", "ARRÊTEZ MEGA BOOST.jpg"),
+    "🛍️ Offre sur article": ("OFFRE.jpg", "ARRÊTE OFFRE.jpg"),
+    "🔗 2 liens": ("2 LIENS.jpg", "ARRÊT 2 LIENS.jpg"),
+    "👗 Dressing": ("DRESSING.jpg", "ARRÊTE DRESSING.jpg"),
+    "👗 Article": ("SESSION ARTICLE.jpg", "ARRÊTEZ LA SEANCE ARTICLES.jpg"),
 }
 
 def fresh():
