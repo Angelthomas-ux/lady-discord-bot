@@ -16,6 +16,10 @@ ROLE_VERT="✅ À JOUR"
 ROLE_ORANGE="Semaine non validée"
 ROLE_ROUGE="Supprimer"
 SEUIL_SEMAINE=6
+
+BASE_DIR=Path(__file__).resolve().parent
+IMAGES_DIR=BASE_DIR/"images"
+
 DATA_DIR=Path(os.environ.get("RAILWAY_VOLUME_MOUNT_PATH","/app/data"))
 DATA_DIR.mkdir(parents=True,exist_ok=True)
 DATA_FILE=DATA_DIR/"lady_data.json"
@@ -30,6 +34,15 @@ bot=commands.Bot(command_prefix="!",intents=intents,help_command=None)
 lock=asyncio.Lock()
 session=None
 started=set()
+
+SESSION_IMAGES = {
+    "🌙 Nocturne": ("nocturne_debut.jpeg", "nocturne_stop.jpeg"),
+    "☕ Petit déjeuner": ("petit_dejeuner_debut.jpeg", "petit_dejeuner_stop.jpeg"),
+    "🍹 Apéro": ("apero_debut.jpeg", "apero_stop.jpeg"),
+    "🚀 Méga Boost": ("mega_debut.jpeg", "mega_stop.jpeg"),
+    "🛍️ Offre sur article": ("offre_debut.jpeg", "offre_stop.jpeg"),
+    "👗 Article": ("article_debut.jpeg", None),
+}
 
 def fresh():
     return {"members":{},"sales_messages":[],"absences":{}}
@@ -56,12 +69,22 @@ def md(uid):
     return m
 
 def now(): return datetime.now(TIMEZONE)
+
 def rem(v):
     if not v:return None
     try:d=datetime.fromisoformat(v)
     except:return None
     if d<=now():return None
     s=int((d-now()).total_seconds()); return f"{s//3600}h {(s%3600)//60:02d}min"
+
+async def send_session_image(channel, name, start=True):
+    pair=SESSION_IMAGES.get(name)
+    if not pair:return
+    filename=pair[0] if start else pair[1]
+    if not filename:return
+    path=IMAGES_DIR/filename
+    if path.exists():
+        await channel.send(file=discord.File(path))
 
 async def role_update(member):
     m=md(member.id)
@@ -105,17 +128,21 @@ async def begin(name,a,b,kind):
     session={"name":name,"end":b,"kind":kind,"participants":set(),"normal":set()}
     if kind=="mega":
         d=bot.get_channel(SALON_DISCUSSION_ID)
-        if d: await d.send(f"@everyone 🚀 *{name} commence !*")
+        if d: await d.send(f"@everyone 🚀 **{name} commence !**")
+    await send_session_image(ch,name,True)
     txt=f"✨ **{name}**\n⏰ Fin : **{b:%H:%M}**\n"
     txt+=("🚫 Aucun bonus 🎁 🎀 👑 💎 pendant le Méga Boost." if kind=="mega" else "🔗 1 lien normal par membre.")
-    await ch.send(txt); return True
+    await ch.send(txt)
+    return True
 
 async def finish():
     global session
     s=session
     if not s:return
     ch=bot.get_channel(SALON_SESSIONS_ID)
-    if ch: await ch.send(f"🛑 **{s['name']} terminée**\n👥 {len(s['participants'])} participante(s).")
+    if ch:
+        await send_session_image(ch,s["name"],False)
+        await ch.send(f"🛑 **{s['name']} terminée**\n👥 {len(s['participants'])} participante(s).")
     if s["kind"]=="mega" and s["participants"]:
         ids=list(s["participants"]); random.shuffle(ids)
         rewards=["🎁","🎀","👑"]; lines=[]
@@ -155,7 +182,7 @@ async def stats(user):
           f"🏆 Record : **{m['record']}**\n⚠️ Avertissements : **{m['warnings']}/3**\n🎁 Cadeaux : **{m['gifts']}**\n"
           f"🎀 Nœuds : **{m['bows']}**\n👑 Couronne : **{'active — '+c if c else 'inactive'}**\n"
           f"💎 Diamant : **{'actif — '+d if d else 'inactif'}**\n🎂 Anniversaire : **{'actif — '+a if a else 'inactif'}**\n"
-          f"🛍️ Ventes semaine : *{m['sales_week']}*")
+          f"🛍️ Ventes semaine : **{m['sales_week']}**")
     try:await user.send(text)
     except discord.Forbidden:pass
 
@@ -207,7 +234,7 @@ def admin(ctx):return ctx.author.guild_permissions.administrator
 @bot.command()
 async def lady_troc(ctx,member:discord.Member,gifts:int):
     if not admin(ctx):return
-    if gifts!=6:return await ctx.send("Troc prévu *6 🎁 = 1 🎀***.")
+    if gifts!=6:return await ctx.send("Troc prévu : **6 🎁 = 1 🎀**.")
     async with lock:
         m=md(member.id)
         if m["gifts"]<6:return await ctx.send("Pas assez de 🎁.")
