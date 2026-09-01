@@ -48,7 +48,7 @@ SESSION_IMAGES = {
 }
 
 def fresh():
-    return {"members":{},"sales_messages":[],"absences":{}}
+    return {"members":{},"sales_messages":[],"absences":{},"session_claims":[]}
 
 def load():
     try:
@@ -170,7 +170,30 @@ async def scheduler():
         a=datetime.combine(t.date(),st,tzinfo=TIMEZONE); b=datetime.combine(t.date(),et,tzinfo=TIMEZONE)
         if a<=t<b:
             k=f"{t.date()}-{st}-{name}"
-            if k not in started and await begin(name,a,b,kind):started.add(k)
+
+            # Sécurité anti-double lancement persistante :
+            # le claim est écrit dans /app/data avant l'envoi de la session.
+            # Il survit donc aux redémarrages / redéploiements Railway.
+            async with lock:
+                claims=DATA.setdefault("session_claims",[])
+                if k in claims:
+                    return
+                claims.append(k)
+                # On ne garde que les claims récents pour éviter que le fichier grossisse.
+                if len(claims)>100:
+                    del claims[:-100]
+                save()
+
+            started.add(k)
+            ok=await begin(name,a,b,kind)
+            if not ok:
+                # Si Lady n'a réellement pas pu démarrer, on libère le claim.
+                async with lock:
+                    claims=DATA.setdefault("session_claims",[])
+                    if k in claims:
+                        claims.remove(k)
+                        save()
+                started.discard(k)
             return
 
 @scheduler.before_loop
