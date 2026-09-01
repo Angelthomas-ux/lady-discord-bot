@@ -115,13 +115,13 @@ async def pp(member):
 
 FIXED=[
 ("🌙 Nocturne",time(0,30),time(8,0),"normal"),
-("☕ Petit déjeuner",time(9),time(9,30),"normal"),
-("🍹 Apéro",time(11,30),time(12),"normal"),
-("🍽️ Repas",time(12),time(12,30),"normal"),
-("🚀 Méga Boost",time(14),time(14,30),"mega"),
-("🍹 Apéro",time(18,30),time(19),"normal"),
-("🍽️ Repas",time(19),time(19,30),"normal"),
-("🚀 Méga Boost",time(21),time(21,30),"mega")]
+("☕ Petit déjeuner",time(9,0),time(9,30),"normal"),
+("🍹 Apéro",time(11,30),time(12,0),"normal"),
+("🍽️ Repas",time(12,0),time(12,30),"normal"),
+("🚀 Méga Boost",time(14,0),time(14,30),"mega"),
+("🍹 Apéro",time(18,30),time(19,0),"normal"),
+("🍽️ Repas",time(19,0),time(19,30),"normal"),
+("🚀 Méga Boost",time(21,0),time(21,30),"mega")]
 
 async def begin(name,a,b,kind):
     global session
