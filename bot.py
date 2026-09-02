@@ -850,7 +850,8 @@ async def send_stats(member):
         f"🎂 Anniversaire : **{remaining(m.get('birthday_until'))}**\n"
         f"🛍️ Ventes semaine : **{m['sales_week']}**\n\n"
         f"🌷 Semaine : "
-        f*{'VALIDÉE ✅' if m['pp_week'] >= 6 else 'À FAIRE 🌸'}**"
+       f"*{'VALIDÉE ✅' if m['pp_week'] >= 6 else 'À FAIRE 🌸'}*"
+
     )
 
     try:
