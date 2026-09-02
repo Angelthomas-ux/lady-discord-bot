@@ -4,8 +4,6 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 import discord
 from discord.ext import commands, tasks
-from PIL import Image, ImageOps, ImageEnhance
-import pytesseract
 
 TIMEZONE=ZoneInfo("Europe/Paris")
 SALON_SESSIONS_ID=1521853338918977558
@@ -256,47 +254,7 @@ async def wait():await bot.wait_until_ready()
 
 VINTED=re.compile(r"https?://\S*vinted\.\S+",re.I)
 
-def normalize_ocr(text):
-    text=unicodedata.normalize("NFD",text or "")
-    text="".join(c for c in text if unicodedata.category(c)!="Mn")
-    return re.sub(r"\\s+"," ",text).lower().strip()
 
-def ocr_is_sale_sync(raw):
-    try:
-        img=Image.open(io.BytesIO(raw)).convert("RGB")
-        if img.width<1600:
-            ratio=1600/max(1,img.width)
-            img=img.resize((int(img.width*ratio),int(img.height*ratio)))
-        gray=ImageOps.grayscale(img)
-        gray=ImageEnhance.Contrast(gray).enhance(1.8)
-        crops=[gray]
-        if gray.height>400:
-            crops.insert(0,gray.crop((0,0,gray.width,int(gray.height*0.60))))
-        texts=[]
-        for crop in crops:
-            for config in ("--psm 6","--psm 11"):
-                try:
-                    texts.append(pytesseract.image_to_string(crop,lang="fra+eng",config=config))
-                except Exception:
-                    try:
-                        texts.append(pytesseract.image_to_string(crop,config=config))
-                    except Exception:
-                        pass
-        detected=normalize_ocr(" ".join(texts))
-        return "vendu" in detected or "article vendu" in detected
-    except Exception as e:
-        print("OCR vente impossible :",repr(e))
-        return False
-
-async def attachment_is_sale(att):
-    if not (att.content_type or "").lower().startswith("image/"):
-        return False
-    try:
-        raw=await att.read()
-        return await asyncio.to_thread(ocr_is_sale_sync,raw)
-    except Exception as e:
-        print("Lecture capture impossible :",repr(e))
-        return False
 
 async def temp_message(channel,text,seconds=15):
     try:
@@ -372,11 +330,8 @@ async def participation(msg):
 async def on_message(msg):
     if msg.author.bot:return
     if (msg.content or "").strip().lower()=="lady_stat":await stats(msg.author);return
-    if msg.channel.id==SALON_VENTES_ID and msg.attachments:
-        for att in msg.attachments:
-            if await attachment_is_sale(att):
-                await sale(msg)
-                break
+   if msg.channel.id==SALON_VENTES_ID and msg.attachments:
+    await sale(msg)
     if msg.channel.id==SALON_SESSIONS_ID and session and VINTED.search(msg.content or ""):await participation(msg)
     await bot.process_commands(msg)
 
