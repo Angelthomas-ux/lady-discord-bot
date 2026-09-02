@@ -20,7 +20,7 @@ ROLE_ROUGE="Supprimer"
 
 SEUIL_SEMAINE=6
 
-BASE_DIR=Path(_file_).resolve().parent
+BASE_DIR=Path(__file__).resolve().parent
 IMAGES_DIR=BASE_DIR
 
 DATA_DIR=Path(os.environ.get("RAILWAY_VOLUME_MOUNT_PATH","/app/data"))
