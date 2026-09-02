@@ -330,7 +330,7 @@ async def participation(msg):
 async def on_message(msg):
     if msg.author.bot:return
     if (msg.content or "").strip().lower()=="lady_stat":await stats(msg.author);return
-   if msg.channel.id==SALON_VENTES_ID and msg.attachments:
+    if msg.channel.id==SALON_VENTES_ID and msg.attachments:
     await sale(msg)
     if msg.channel.id==SALON_SESSIONS_ID and session and VINTED.search(msg.content or ""):await participation(msg)
     await bot.process_commands(msg)
