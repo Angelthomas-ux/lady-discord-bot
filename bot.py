@@ -1,9 +1,11 @@
-import os, json, random, asyncio, re
+import os, json, random, asyncio, re, io, unicodedata
 from datetime import datetime, timedelta, time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 import discord
 from discord.ext import commands, tasks
+from PIL import Image, ImageOps, ImageEnhance
+import pytesseract
 
 TIMEZONE=ZoneInfo("Europe/Paris")
 SALON_SESSIONS_ID=1521853338918977558
@@ -254,6 +256,54 @@ async def wait():await bot.wait_until_ready()
 
 VINTED=re.compile(r"https?://\S*vinted\.\S+",re.I)
 
+def normalize_ocr(text):
+    text=unicodedata.normalize("NFD",text or "")
+    text="".join(c for c in text if unicodedata.category(c)!="Mn")
+    return re.sub(r"\\s+"," ",text).lower().strip()
+
+def ocr_is_sale_sync(raw):
+    try:
+        img=Image.open(io.BytesIO(raw)).convert("RGB")
+        if img.width<1600:
+            ratio=1600/max(1,img.width)
+            img=img.resize((int(img.width*ratio),int(img.height*ratio)))
+        gray=ImageOps.grayscale(img)
+        gray=ImageEnhance.Contrast(gray).enhance(1.8)
+        crops=[gray]
+        if gray.height>400:
+            crops.insert(0,gray.crop((0,0,gray.width,int(gray.height*0.60))))
+        texts=[]
+        for crop in crops:
+            for config in ("--psm 6","--psm 11"):
+                try:
+                    texts.append(pytesseract.image_to_string(crop,lang="fra+eng",config=config))
+                except Exception:
+                    try:
+                        texts.append(pytesseract.image_to_string(crop,config=config))
+                    except Exception:
+                        pass
+        detected=normalize_ocr(" ".join(texts))
+        return "vendu" in detected or "article vendu" in detected
+    except Exception as e:
+        print("OCR vente impossible :",repr(e))
+        return False
+
+async def attachment_is_sale(att):
+    if not (att.content_type or "").lower().startswith("image/"):
+        return False
+    try:
+        raw=await att.read()
+        return await asyncio.to_thread(ocr_is_sale_sync,raw)
+    except Exception as e:
+        print("Lecture capture impossible :",repr(e))
+        return False
+
+async def temp_message(channel,text,seconds=15):
+    try:
+        await channel.send(text,delete_after=seconds)
+    except (discord.Forbidden,discord.HTTPException):
+        pass
+
 async def stats(user):
     m=md(user.id); c=rem(m["crown_until"]); d=rem(m["diamond_until"]); a=rem(m["birthday_until"])
     status="✅ Validée" if m["pp_week"]>=6 else f"🌸 En cours ({m['pp_week']}/6)"
@@ -268,8 +318,23 @@ async def stats(user):
 async def sale(msg):
     mid=str(msg.id)
     async with lock:
-        if mid in DATA["sales_messages"]:return
-        DATA["sales_messages"].append(mid); m=md(msg.author.id);m["sales_week"]+=1;m["bows"]+=1;save()
+        if mid in DATA["sales_messages"]:
+            return False
+        DATA["sales_messages"].append(mid)
+        m=md(msg.author.id)
+        m["sales_week"]+=1
+        m["bows"]+=1
+        sales=m["sales_week"]
+        bows=m["bows"]
+        save()
+    await temp_message(
+        msg.channel,
+        f"🎀 {msg.author.mention} **+1 vente !**\n"
+        f"🛍️ Tu es maintenant à **{sales} vente(s) cette semaine**.\n"
+        f"🎀 **+1 nœud gagné** — tu en as **{bows}**.",
+        15
+    )
+    return True
 
 async def participation(msg):
     global session
@@ -279,7 +344,10 @@ async def participation(msg):
     if s["kind"]=="mega":
         if any(x in text for x in "🎁🎀👑💎"):return
         if uid in s["normal"]:return
-        s["normal"].add(uid);s["participants"].add(uid);await pp(msg.author);return
+        s["normal"].add(uid);s["participants"].add(uid);await pp(msg.author)
+        current=md(uid)["pp_week"]
+        await temp_message(msg.channel,f"💗 {msg.author.mention} **+1 PP** — tu es maintenant à **{current}/6 PP** cette semaine.",15)
+        return
     if "🎁" in text:
         async with lock:
             m=md(uid)
@@ -297,14 +365,18 @@ async def participation(msg):
             except:pass
         return
     s["normal"].add(uid);s["participants"].add(uid);await pp(msg.author)
+    current=md(uid)["pp_week"]
+    await temp_message(msg.channel,f"💗 {msg.author.mention} **+1 PP** — tu es maintenant à **{current}/6 PP** cette semaine.",15)
 
 @bot.event
 async def on_message(msg):
     if msg.author.bot:return
     if (msg.content or "").strip().lower()=="lady_stat":await stats(msg.author);return
-    if msg.channel.id==SALON_VENTES_ID:
-        image=any((x.content_type or "").startswith("image/") for x in msg.attachments)
-        if "vendu" in (msg.content or "").lower() and image:await sale(msg)
+    if msg.channel.id==SALON_VENTES_ID and msg.attachments:
+        for att in msg.attachments:
+            if await attachment_is_sale(att):
+                await sale(msg)
+                break
     if msg.channel.id==SALON_SESSIONS_ID and session and VINTED.search(msg.content or ""):await participation(msg)
     await bot.process_commands(msg)
 
