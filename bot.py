@@ -46,54 +46,44 @@ lock=asyncio.Lock()
 session=None
 started=set()
 
-FREE_SESSIONS=[
-    "🛍️ Offre sur article",
-    "🔗 2 liens",
-    "👗 Dressing",
-    "👗 Article",
-]
-
-last_free_session=None
-
-SESSION_IMAGES={
-    "🌙 Nocturne"🙁
+SESSION_IMAGES = {
+    "🌙 Nocturne": (
         "NOCTURNE.jpg",
         "STOP NOCTURNE.jpg"
     ),
-    "☕ Petit déjeuner"🙁
+    "☕ Petit déjeuner": (
         "PETIT DEJEUNER.jpg",
         "STOP PETIT DEJEUNER.jpg"
     ),
-    "🍹 Apéro"🙁
+    "🍹 Apéro": (
         "APERO.jpg",
         "APERO STOP.jpg"
     ),
-    "🍽️ Repas"🙁
+    "🍽️ Repas": (
         "REPAS.jpg",
         "REPAS STOP.jpg"
     ),
-    "🚀 Méga Boost"🙁
+    "🚀 Méga Boost": (
         "MEGA BOOST.jpg",
         "STOP MEGA BOOST.jpg"
     ),
-    "🛍️ Offre sur article"🙁
+    "🛍️ Offre sur article": (
         "OFFRE.jpg",
         "STOP OFFRE.jpg"
     ),
-    "🔗 2 liens"🙁
+    "🔗 2 liens": (
         "2 LIENS.jpg",
         "STOP 2 LIENS.jpg"
     ),
-    "👗 Dressing"🙁
+    "👗 Dressing": (
         "DRESSING.jpg",
         "STOP DRESSING.jpg"
     ),
-    "👗 Article"🙁
+    "👗 Article": (
         "SESSION ARTICLE.jpg",
         "STOP SESSION ARTICLES.jpg"
     ),
 }
-
 
 # ============================================================
 # DONNEES
