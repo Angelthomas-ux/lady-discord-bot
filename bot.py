@@ -1,1040 +1,707 @@
-import os, json, random, asyncio, re
+import os
+import json
+import random
+import asyncio
+import re
 from datetime import datetime, timedelta, time
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
 import discord
 from discord.ext import commands, tasks
 
-TIMEZONE=ZoneInfo("Europe/Paris")
+# ============================================================
+# LADY — VERSION PROPRE
+# ============================================================
 
-SALON_SESSIONS_ID=1521853338918977558
-SALON_VENTES_ID=1528658847806390382
-SALON_JEU_ID=1541713193762820106
-SALON_DISCUSSION_ID=1528130797029167134
-SALON_ANNIVERSAIRES_ID=1541680943583068200
+TIMEZONE = ZoneInfo("Europe/Paris")
 
-ROLE_ROSE="🌸 SEMAINE À FAIRE"
-ROLE_VERT="✅ À JOUR"
-ROLE_ORANGE="Semaine non validée"
-ROLE_ROUGE="Supprimer"
+SALON_SESSIONS_ID = 1521853338918977558
+SALON_VENTES_ID = 1528658847806390382
+SALON_JEU_ID = 1541713193762820106
+SALON_DISCUSSION_ID = 1528130797029167134
+SALON_ANNIVERSAIRES_ID = 1541680943583068200
 
-SEUIL_SEMAINE=6
+ROLE_ROSE = "🌸 SEMAINE À FAIRE"
+ROLE_VERT = "✅ À JOUR"
+ROLE_ORANGE = "Semaine non validée"
+ROLE_ROUGE = "Supprimer"
 
-BASE_DIR=Path(__file__).resolve().parent
-IMAGES_DIR=BASE_DIR
+DATA_DIR = Path(os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", "/app/data"))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+DATA_FILE = DATA_DIR / "lady_data.json"
 
-DATA_DIR=Path(os.environ.get("RAILWAY_VOLUME_MOUNT_PATH","/app/data"))
-DATA_DIR.mkdir(parents=True,exist_ok=True)
-DATA_FILE=DATA_DIR/"lady_data.json"
+BASE_DIR = Path(_file_).resolve().parent
 
-TOKEN=os.environ.get("DISCORD_TOKEN")
+TOKEN = os.environ.get("DISCORD_TOKEN")
 if not TOKEN:
-    raise RuntimeError("DISCORD_TOKEN absent")
+    raise RuntimeError("La variable DISCORD_TOKEN est absente.")
 
-intents=discord.Intents.default()
-intents.message_content=True
-intents.members=True
-intents.reactions=True
+intents = discord.Intents.default()
+intents.message_content = True
+intents.members = True
+intents.reactions = True
 
-bot=commands.Bot(
-    command_prefix="!",
-    intents=intents,
-    help_command=None
-)
+bot = commands.Bot(command_prefix="lady_", intents=intents, help_command=None)
 
-lock=asyncio.Lock()
-session=None
-started=set()
-
-SESSION_IMAGES = {
-    "🌙 Nocturne": (
-        "NOCTURNE.jpg",
-        "STOP NOCTURNE.jpg"
-    ),
-    "☕ Petit déjeuner": (
-        "PETIT DEJEUNER.jpg",
-        "STOP PETIT DEJEUNER.jpg"
-    ),
-    "🍹 Apéro": (
-        "APERO.jpg",
-        "APERO STOP.jpg"
-    ),
-    "🍽️ Repas": (
-        "REPAS.jpg",
-        "REPAS STOP.jpg"
-    ),
-    "🚀 Méga Boost": (
-        "MEGA BOOST.jpg",
-        "STOP MEGA BOOST.jpg"
-    ),
-    "🛍️ Offre sur article": (
-        "OFFRE.jpg",
-        "STOP OFFRE.jpg"
-    ),
-    "🔗 2 liens": (
-        "2 LIENS.jpg",
-        "STOP 2 LIENS.jpg"
-    ),
-    "👗 Dressing": (
-        "DRESSING.jpg",
-        "STOP DRESSING.jpg"
-    ),
-    "👗 Article": (
-        "SESSION ARTICLE.jpg",
-        "STOP SESSION ARTICLES.jpg"
-    ),
-}
+VINTED = re.compile(r"(?:https?://)?(?:www\.)?vinted\.[^\s/]+/[^\s]+", re.I)
+data_lock = asyncio.Lock()
+session_lock = asyncio.Lock()
 
 # ============================================================
-# DONNEES
+# DONNEES — COMPATIBLE AVEC LE lady_data.json EXISTANT
 # ============================================================
 
-def fresh():
+def fresh_data():
     return {
-        "members":{},
-        "sales_messages":[],
-        "absences":{},
-        "session_claims":[]
+        "members": {},
+        "sales_messages": [],
+        "absences": {},
+        "session_claims": [],
     }
 
-
-def load():
+def load_data():
+    if not DATA_FILE.exists():
+        return fresh_data()
     try:
-        with DATA_FILE.open(encoding="utf-8") as f:
-            d=json.load(f)
+        with DATA_FILE.open("r", encoding="utf-8") as f:
+            raw = json.load(f)
+        if not isinstance(raw, dict):
+            return fresh_data()
+        raw.setdefault("members", {})
+        raw.setdefault("sales_messages", [])
+        raw.setdefault("absences", {})
+        raw.setdefault("session_claims", [])
+        return raw
+    except Exception as exc:
+        print("Erreur lecture lady_data.json:", exc)
+        return fresh_data()
 
-        x=fresh()
-        x.update(d)
-        return x
-
-    except Exception:
-        return fresh()
-
-
-DATA=load()
-
+DATA = load_data()
 
 def save():
-    p=DATA_FILE.with_suffix(".tmp")
-
-    p.write_text(
-        json.dumps(
-            DATA,
-            ensure_ascii=False,
-            indent=2
-        ),
-        encoding="utf-8"
-    )
-
-    os.replace(p,DATA_FILE)
-
+    tmp = DATA_FILE.with_suffix(".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        json.dump(DATA, f, ensure_ascii=False, indent=2)
+    tmp.replace(DATA_FILE)
 
 def md(uid):
-    m=DATA["members"].setdefault(
-        str(uid),
-        {}
-    )
-
-    defaults={
-        "pp_week":0,
-        "pp_total":0,
-        "record":0,
-        "warnings":0,
-        "gifts":0,
-        "bows":0,
-        "sales_week":0,
-        "crown_until":None,
-        "diamond_until":None,
-        "birthday_until":None,
-        "gift_step":0,
-        "diamond_step":0
+    uid = str(uid)
+    m = DATA["members"].setdefault(uid, {})
+    defaults = {
+        "pp_week": 0,
+        "pp_record": 0,
+        "warnings": 0,
+        "gifts": 0,
+        "bows": 0,
+        "sales_week": 0,
+        "crown_until": None,
+        "diamond_until": None,
+        "birthday_until": None,
     }
-
-    for k,v in defaults.items():
-        m.setdefault(k,v)
-
+    for k, v in defaults.items():
+        m.setdefault(k, v)
     return m
-
 
 def now():
     return datetime.now(TIMEZONE)
 
-
-def rem(v):
-    if not v:
+def parse_dt(value):
+    if not value:
         return None
-
     try:
-        d=datetime.fromisoformat(v)
+        d = datetime.fromisoformat(value)
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=TIMEZONE)
+        return d.astimezone(TIMEZONE)
     except Exception:
         return None
 
-    if d<=now():
-        return None
+def active_until(value):
+    d = parse_dt(value)
+    return bool(d and d > now())
 
-    s=int((d-now()).total_seconds())
-
-    return f"{s//3600}h {(s%3600)//60:02d}min"
-
-
-# ============================================================
-# IMAGES
-# ============================================================
-
-async def send_session_image(channel,name,start=True):
-    pair=SESSION_IMAGES.get(name)
-
-    if not pair:
-        return
-
-    filename=pair[0] if start else pair[1]
-
-    if not filename:
-        return
-
-    path=IMAGES_DIR/filename
-
-    if path.exists():
-        await channel.send(
-            file=discord.File(path)
-        )
-
+def remaining(value):
+    d = parse_dt(value)
+    if not d or d <= now():
+        return "inactif"
+    delta = d - now()
+    total = max(0, int(delta.total_seconds()))
+    h, rem = divmod(total, 3600)
+    minutes = rem // 60
+    return f"{h}h {minutes:02d}min"
 
 # ============================================================
-# ROLES / PP
+# SESSIONS
 # ============================================================
 
-async def role_update(member):
-    m=md(member.id)
-
-    rose=discord.utils.get(
-        member.guild.roles,
-        name=ROLE_ROSE
-    )
-
-    green=discord.utils.get(
-        member.guild.roles,
-        name=ROLE_VERT
-    )
-
-    try:
-        if m["pp_week"]>=SEUIL_SEMAINE:
-
-            if green and green not in member.roles:
-                await member.add_roles(green)
-
-            if rose and rose in member.roles:
-                await member.remove_roles(rose)
-
-        elif rose and rose not in member.roles:
-            await member.add_roles(rose)
-
-    except discord.Forbidden:
-        pass
-
-
-async def pp(member):
-    async with lock:
-
-        m=md(member.id)
-
-        m["pp_week"]+=1
-        m["pp_total"]+=1
-
-        m["record"]=max(
-            m["record"],
-            m["pp_week"]
-        )
-
-        gs=m["pp_total"]//6
-
-        if gs>m["gift_step"]:
-            m["gifts"]+=gs-m["gift_step"]
-            m["gift_step"]=gs
-
-        ds=m["pp_total"]//20
-
-        if ds>m["diamond_step"]:
-            m["diamond_step"]=ds
-            m["diamond_until"]=(
-                now()+timedelta(hours=24)
-            ).isoformat()
-
-        save()
-
-    await role_update(member)
-
-
-# ============================================================
-# SESSIONS FIXES
-# ============================================================
-
-FIXED=[
-    (
-        "🌙 Nocturne",
-        time(0,30),
-        time(8,0),
-        "normal"
-    ),
-    (
-        "☕ Petit déjeuner",
-        time(9,0),
-        time(9,30),
-        "normal"
-    ),
-    (
-        "🍹 Apéro",
-        time(11,30),
-        time(12,0),
-        "normal"
-    ),
-    (
-        "🍽️ Repas",
-        time(12,0),
-        time(12,30),
-        "normal"
-    ),
-    (
-        "🚀 Méga Boost",
-        time(14,0),
-        time(14,30),
-        "mega"
-    ),
-    (
-        "🍹 Apéro",
-        time(18,30),
-        time(19,0),
-        "normal"
-    ),
-    (
-        "🍽️ Repas",
-        time(19,0),
-        time(19,30),
-        "normal"
-    ),
-    (
-        "🚀 Méga Boost",
-        time(21,0),
-        time(21,30),
-        "mega"
-    )
+FIXED = [
+    ("🌙 Nocturne", time(0, 30), time(8, 0), "normal"),
+    ("☕ Petit déjeuner", time(9, 0), time(9, 30), "normal"),
+    ("🍹 Apéro", time(11, 30), time(12, 0), "normal"),
+    ("🍽️ Repas", time(12, 0), time(12, 30), "normal"),
+    ("🚀 Méga Boost", time(14, 0), time(14, 30), "mega"),
+    ("🍹 Apéro", time(18, 30), time(19, 0), "normal"),
+    ("🍽️ Repas", time(19, 0), time(19, 30), "normal"),
+    ("🚀 Méga Boost", time(21, 0), time(21, 30), "mega"),
 ]
 
+FREE_SESSIONS = [
+    "🛍️ Offre sur article",
+    "🔗 2 liens",
+    "👗 Dressing",
+    "👗 Article",
+]
 
-def fixed_window(t):
+SESSION_IMAGES = {
+    "🌙 Nocturne": ("NOCTURNE.jpg", "STOP NOCTURNE.jpg"),
+    "☕ Petit déjeuner": ("PETIT DEJEUNER.jpg", "STOP PETIT DEJEUNER.jpg"),
+    "🍹 Apéro": ("APERO.jpg", "APERO STOP.jpg"),
+    "🍽️ Repas": ("REPAS.jpg", "REPAS STOP.jpg"),
+    "🚀 Méga Boost": ("MEGA BOOST.jpg", "STOP MEGA BOOST.jpg"),
+    "🛍️ Offre sur article": ("OFFRE.jpg", "STOP OFFRE.jpg"),
+    "🔗 2 liens": ("2 LIENS.jpg", "STOP 2 LIENS.jpg"),
+    "👗 Dressing": ("DRESSING.jpg", "STOP DRESSING.jpg"),
+    "👗 Article": ("SESSION ARTICLE.jpg", "STOP SESSION ARTICLES.jpg"),
+}
 
-    for name,st,et,kind in FIXED:
+session = None
+last_free_session = None
 
-        a=datetime.combine(
-            t.date(),
-            st,
-            tzinfo=TIMEZONE
-        )
+def dt_today(t):
+    n = now()
+    return datetime.combine(n.date(), t, tzinfo=TIMEZONE)
 
-        b=datetime.combine(
-            t.date(),
-            et,
-            tzinfo=TIMEZONE
-        )
-
-        if a<=t<b:
-            return name,a,b,kind
-
+def current_fixed(n=None):
+    n = n or now()
+    for name, start_t, end_t, kind in FIXED:
+        start = datetime.combine(n.date(), start_t, tzinfo=TIMEZONE)
+        end = datetime.combine(n.date(), end_t, tzinfo=TIMEZONE)
+        if start <= n < end:
+            return name, start, end, kind
     return None
 
+def next_fixed_start(n=None):
+    n = n or now()
+    candidates = []
+    for _, start_t, _, _ in FIXED:
+        d = datetime.combine(n.date(), start_t, tzinfo=TIMEZONE)
+        if d > n:
+            candidates.append(d)
+    if candidates:
+        return min(candidates)
+    tomorrow = n.date() + timedelta(days=1)
+    return datetime.combine(tomorrow, FIXED[0][1], tzinfo=TIMEZONE)
 
-def next_fixed_start(t):
+def claim_key(name, start):
+    return f"{name}|{start.strftime('%Y-%m-%dT%H:%M')}"
 
-    starts=[]
-
-    for day_add in (0,1):
-
-        day=t.date()+timedelta(
-            days=day_add
-        )
-
-        for name,st,et,kind in FIXED:
-
-            a=datetime.combine(
-                day,
-                st,
-                tzinfo=TIMEZONE
-            )
-
-            if a>t:
-                starts.append(a)
-
-    return min(starts) if starts else None
-
-
-# ============================================================
-# DEMARRAGE SESSION
-# ============================================================
-
-async def begin(name,a,b,kind):
-
-    global session
-
-    if session:
-        return False
-
-    ch=bot.get_channel(
-        SALON_SESSIONS_ID
-    )
-
-    if not ch:
-        return False
-
-    session={
-        "name":name,
-        "end":b,
-        "kind":kind,
-        "participants":set(),
-        "normal":set()
-    }
-
-    if kind=="mega":
-
-        d=bot.get_channel(
-            SALON_DISCUSSION_ID
-        )
-
-        if d:
-            await d.send(
-                f"@everyone 🚀 *{name} commence !*"
-            )
-
-    await send_session_image(
-        ch,
-        name,
-        True
-    )
-
-    txt=(
-        f"✨ **{name}**\n"
-        f"⏰ Fin : **{b:%H:%M}**\n"
-    )
-
-    if kind=="mega":
-
-        txt+=(
-            "🚫 Aucun bonus 🎁 🎀 👑 💎 "
-            "pendant le Méga Boost."
-        )
-
-    elif name=="👗 Dressing":
-
-        nb_articles=random.randint(3,10)
-
-        session["dressing_articles"]=(
-            nb_articles
-        )
-
-        txt+=(
-            f"👗 *{nb_articles} articles* "
-            "à favoriser dans le dressing."
-        )
-
-    else:
-
-        txt+="🔗 1 lien normal par membre."
-
-    await ch.send(txt)
-
+async def claim_session(name, start):
+    key = claim_key(name, start)
+    async with data_lock:
+        claims = DATA.setdefault("session_claims", [])
+        if key in claims:
+            return False
+        claims.append(key)
+        DATA["session_claims"] = claims[-100:]
+        save()
     return True
 
+async def send_image(channel, filename):
+    path = BASE_DIR / filename
+    if path.exists():
+        try:
+            await channel.send(file=discord.File(path))
+            return True
+        except Exception as exc:
+            print(f"Image impossible {filename}: {exc}")
+    else:
+        print(f"Image absente: {path}")
+    return False
 
-# ============================================================
-# FIN SESSION
-# ============================================================
-
-async def finish():
-
+async def begin_session(name, start, end, kind, is_free=False):
     global session
 
-    s=session
+    channel = bot.get_channel(SALON_SESSIONS_ID)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(SALON_SESSIONS_ID)
+        except Exception as exc:
+            print("Salon sessions introuvable:", exc)
+            return
 
-    if not s:
+    dressing_count = random.randint(3, 10) if name == "👗 Dressing" else None
+
+    session = {
+        "name": name,
+        "start": start,
+        "end": end,
+        "kind": kind,
+        "free": is_free,
+        "normal": set(),
+        "participants": set(),
+        "dressing_count": dressing_count,
+    }
+
+    start_img = SESSION_IMAGES.get(name, (None, None))[0]
+    if start_img:
+        await send_image(channel, start_img)
+
+    if name == "👗 Dressing":
+        text = (
+            f"👗 **SESSION DRESSING**\n"
+            f"Lady a choisi *{dressing_count} articles*.\n"
+            f"⏰ Fin à *{end.strftime('%H:%M')}*."
+        )
+    elif name == "🔗 2 liens":
+        text = (
+            f"🔗 **SESSION 2 LIENS**\n"
+            f"Vous pouvez envoyer *2 liens*.\n"
+            f"⏰ Fin à *{end.strftime('%H:%M')}*."
+        )
+    else:
+        text = f"✨ *{name}**\n⏰ Fin à **{end.strftime('%H:%M')}*."
+
+    await channel.send(text)
+
+    if kind == "mega":
+        discussion = bot.get_channel(SALON_DISCUSSION_ID)
+        if discussion:
+            try:
+                await discussion.send("@everyone 🚀 *Le Méga Boost vient de commencer !*")
+            except Exception:
+                pass
+
+    print(f"Session lancée: {name} jusqu'à {end:%H:%M}")
+
+async def finish_session():
+    global session
+    if not session:
         return
 
-    ch=bot.get_channel(
-        SALON_SESSIONS_ID
+    old = session
+    session = None
+
+    channel = bot.get_channel(SALON_SESSIONS_ID)
+    if channel is None:
+        return
+
+    stop_img = SESSION_IMAGES.get(old["name"], (None, None))[1]
+    if stop_img:
+        await send_image(channel, stop_img)
+
+    participants = list(old["participants"])
+    await channel.send(
+        f"⛔ **Fin de {old['name']}**\n"
+        f"👥 *{len(participants)} participante(s)*."
     )
 
-    if ch:
+    if old["kind"] == "mega" and participants:
+        if len(participants) >= 3:
+            winners = random.sample(participants, 3)
+            rewards = ["gift", "bow", "crown"]
+            random.shuffle(rewards)
 
-        await send_session_image(
-            ch,
-            s["name"],
-            False
-        )
+            lines = []
+            async with data_lock:
+                for uid, reward in zip(winners, rewards):
+                    member = channel.guild.get_member(uid)
+                    m = md(uid)
+                    if reward == "gift":
+                        m["gifts"] += 1
+                        label = "🎁 1 cadeau"
+                    elif reward == "bow":
+                        m["bows"] += 1
+                        label = "🎀 1 nœud"
+                    else:
+                        m["crown_until"] = (now() + timedelta(hours=24)).isoformat()
+                        label = "👑 Couronne pendant 24 h"
+                    mention = member.mention if member else f"<@{uid}>"
+                    lines.append(f"{mention} → *{label}*")
+                save()
 
-        await ch.send(
-            f"🛑 **{s['name']} terminée**\n"
-            f"👥 {len(s['participants'])} participante(s)."
-        )
-
-    if (
-        s["kind"]=="mega"
-        and s["participants"]
-    ):
-
-        ids=list(s["participants"])
-
-        random.shuffle(ids)
-
-        rewards=[
-            "🎁",
-            "🎀",
-            "👑"
-        ]
-
-        lines=[]
-
-        async with lock:
-
-            for uid,r in zip(
-                ids[:3],
-                rewards
-            ):
-
-                m=md(uid)
-
-                if r=="🎁":
-                    m["gifts"]+=1
-
-                elif r=="🎀":
-                    m["bows"]+=1
-
-                else:
-                    m["crown_until"]=(
-                        now()
-                        +timedelta(hours=24)
-                    ).isoformat()
-
-                lines.append(
-                    f"<@{uid}> gagne {r}"
-                )
-
-            save()
-
-        if ch:
-            await ch.send(
-                "🎉 **Résultats Méga Boost**\n"
-                +"\n".join(lines)
+            await channel.send("🎉 **Gagnantes du Méga Boost :**\n" + "\n".join(lines))
+        else:
+            await channel.send(
+                "💗 Il faut au moins *3 participantes différentes* "
+                "pour le tirage des 3 bonus du Méga Boost."
             )
 
-    session=None
-
-
-# ============================================================
-# SESSIONS LIBRES
-# ============================================================
-
-async def launch_free(t):
-
+async def launch_free(n=None):
     global last_free_session
+    n = n or now()
 
-    choices=[
-        x for x in FREE_SESSIONS
-        if x!=last_free_session
-    ]
-
+    choices = [x for x in FREE_SESSIONS if x != last_free_session]
     if not choices:
-        choices=FREE_SESSIONS[:]
+        choices = FREE_SESSIONS[:]
 
-    name=random.choice(choices)
+    name = random.choice(choices)
+    end = min(n + timedelta(minutes=10), next_fixed_start(n))
 
-    end=t+timedelta(minutes=10)
+    if (end - n).total_seconds() < 30:
+        return
 
-    nf=next_fixed_start(t)
+    # Une clé à la minute évite les doubles lancements après redéploiement.
+    if not await claim_session(name, n.replace(second=0, microsecond=0)):
+        return
 
-    if nf and nf<end:
-        end=nf
-
-    if end<=t+timedelta(seconds=30):
-        return False
-
-    ok=await begin(
-        name,
-        t,
-        end,
-        "free"
-    )
-
-    if ok:
-        last_free_session=name
-
-    return ok
-
-
-# ============================================================
-# PLANIFICATEUR
-# ============================================================
+    last_free_session = name
+    await begin_session(name, n, end, "normal", is_free=True)
 
 @tasks.loop(seconds=20)
 async def scheduler():
-
     global session
+    n = now()
 
-    t=now()
+    async with session_lock:
+        if session and n >= session["end"]:
+            await finish_session()
 
-    if session and t>=session["end"]:
-        await finish()
+        fixed = current_fixed(n)
 
-    fw=fixed_window(t)
+        if fixed:
+            name, start, end, kind = fixed
 
-    if fw:
-
-        name,a,b,kind=fw
-
-        if session:
-
-            if session["kind"]=="free":
-                await finish()
-
-            else:
+            if session and session["name"] == name and session["start"] == start:
                 return
 
-        k=f"{t.date()}-{a.time()}-{name}"
+            if session:
+                await finish_session()
 
-        async with lock:
+            if await claim_session(name, start):
+                await begin_session(name, start, end, kind, is_free=False)
+            return
 
-            claims=DATA.setdefault(
-                "session_claims",
-                []
-            )
-
-            if k in claims:
-                return
-
-            claims.append(k)
-
-            if len(claims)>100:
-                del claims[:-100]
-
-            save()
-
-        started.add(k)
-
-        ok=await begin(
-            name,
-            a,
-            b,
-            kind
-        )
-
-        if not ok:
-
-            async with lock:
-
-                claims=DATA.setdefault(
-                    "session_claims",
-                    []
-                )
-
-                if k in claims:
-                    claims.remove(k)
-                    save()
-
-            started.discard(k)
-
-        return
-
-    if not session:
-        await launch_free(t)
-
+        if session is None:
+            await launch_free(n)
 
 @scheduler.before_loop
-async def wait():
+async def before_scheduler():
     await bot.wait_until_ready()
-
-
-# ============================================================
-# VINTED
-# ============================================================
-
-VINTED=re.compile(
-    r"https?://\S*vinted\.\S+",
-    re.I
-)
-
 
 # ============================================================
 # MESSAGES TEMPORAIRES
 # ============================================================
 
-async def temp_message(
-    channel,
-    text,
-    seconds=15
-):
-
+async def temp_message(channel, text, seconds=15):
     try:
-        await channel.send(
-            text,
-            delete_after=seconds
-        )
-
-    except (
-        discord.Forbidden,
-        discord.HTTPException
-    ):
+        msg = await channel.send(text)
+        await asyncio.sleep(seconds)
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+    except Exception:
         pass
 
+# ============================================================
+# ROLES
+# ============================================================
+
+async def update_week_role(member):
+    if not isinstance(member, discord.Member):
+        return
+
+    m = md(member.id)
+    rose = discord.utils.get(member.guild.roles, name=ROLE_ROSE)
+    green = discord.utils.get(member.guild.roles, name=ROLE_VERT)
+
+    try:
+        if m["pp_week"] >= 6:
+            if green and green not in member.roles:
+                await member.add_roles(green, reason="Semaine Lady validée")
+            if rose and rose in member.roles:
+                await member.remove_roles(rose, reason="Semaine Lady validée")
+        else:
+            if rose and rose not in member.roles:
+                await member.add_roles(rose, reason="Semaine Lady en cours")
+    except discord.Forbidden:
+        print("Lady ne peut pas modifier les rôles.")
+    except Exception as exc:
+        print("Erreur rôle:", exc)
+
+# ============================================================
+# PP ET BONUS
+# ============================================================
+
+async def award_pp(member):
+    async with data_lock:
+        m = md(member.id)
+        before = int(m["pp_week"])
+        m["pp_week"] = before + 1
+        m["pp_record"] = max(int(m.get("pp_record", 0)), m["pp_week"])
+
+        # Un cadeau à chaque palier de 6 PP.
+        if m["pp_week"] // 6 > before // 6:
+            m["gifts"] += 1
+
+        # Diamant actif 24 h à chaque palier de 20 PP.
+        if m["pp_week"] // 20 > before // 20:
+            m["diamond_until"] = (now() + timedelta(hours=24)).isoformat()
+
+        current = m["pp_week"]
+        save()
+
+    await update_week_role(member)
+    return current
+
+def has_bonus_marker(content, marker):
+    return marker in (content or "")
+
+async def participation(msg):
+    global session
+    if not session:
+        return
+
+    uid = msg.author.id
+    content = msg.content or ""
+    kind = session["kind"]
+
+    # Aucun bonus utilisable pendant le Méga Boost.
+    if kind == "mega":
+        if any(x in content for x in ("🎁", "🎀", "👑", "💎")):
+            await temp_message(
+                msg.channel,
+                f"🚀 {msg.author.mention} aucun bonus 🎁 🎀 👑 💎 "
+                f"n'est utilisable pendant le Méga Boost."
+            )
+            return
+
+        if uid not in session["normal"]:
+            session["normal"].add(uid)
+            session["participants"].add(uid)
+            current = await award_pp(msg.author)
+            await temp_message(
+                msg.channel,
+                f"💗 {msg.author.mention} *+1 PP* — tu es maintenant à "
+                f"*{current}/6 PP* cette semaine."
+            )
+        return
+
+    async with data_lock:
+        m = md(uid)
+
+        # 🎀 = lien sans rendre, consommé une fois.
+        if has_bonus_marker(content, "🎀"):
+            if m["bows"] <= 0:
+                asyncio.create_task(temp_message(
+                    msg.channel,
+                    f"🎀 {msg.author.mention} tu n'as pas de nœud disponible."
+                ))
+                return
+            m["bows"] -= 1
+            save()
+            asyncio.create_task(temp_message(
+                msg.channel,
+                f"🎀 {msg.author.mention} ton lien sans rendre est validé. "
+                f"Il te reste *{m['bows']} nœud(s)*."
+            ))
+            return
+
+        # 🎁 = lien supplémentaire, consommé une fois.
+        if has_bonus_marker(content, "🎁"):
+            if m["gifts"] <= 0:
+                asyncio.create_task(temp_message(
+                    msg.channel,
+                    f"🎁 {msg.author.mention} tu n'as pas de cadeau disponible."
+                ))
+                return
+            m["gifts"] -= 1
+            save()
+            asyncio.create_task(temp_message(
+                msg.channel,
+                f"🎁 {msg.author.mention} ton lien supplémentaire est validé. "
+                f"Il te reste *{m['gifts']} cadeau(x)*."
+            ))
+            return
+
+        # 👑 et 💎 sont actifs 24 h et ne sont pas consommés.
+        if has_bonus_marker(content, "👑"):
+            if not active_until(m.get("crown_until")):
+                asyncio.create_task(temp_message(
+                    msg.channel,
+                    f"👑 {msg.author.mention} ta couronne n'est pas active."
+                ))
+                return
+            asyncio.create_task(temp_message(
+                msg.channel,
+                f"👑 {msg.author.mention} lien bonus Couronne validé."
+            ))
+            return
+
+        if has_bonus_marker(content, "💎"):
+            if not active_until(m.get("diamond_until")):
+                asyncio.create_task(temp_message(
+                    msg.channel,
+                    f"💎 {msg.author.mention} ton diamant n'est pas actif."
+                ))
+                return
+            asyncio.create_task(temp_message(
+                msg.channel,
+                f"💎 {msg.author.mention} lien bonus Diamant validé."
+            ))
+            return
+
+    # Premier lien normal de la session = +1 PP.
+    if uid not in session["normal"]:
+        session["normal"].add(uid)
+        session["participants"].add(uid)
+        current = await award_pp(msg.author)
+        await temp_message(
+            msg.channel,
+            f"💗 {msg.author.mention} *+1 PP* — tu es maintenant à "
+            f"*{current}/6 PP* cette semaine."
+        )
+
+# ============================================================
+# VENTES
+# Version stable : une capture envoyée dans le salon ventes
+# compte une seule fois. Pas d'OCR ici, donc pas de Pillow/Tesseract.
+# ============================================================
+
+async def sale(msg):
+    mid = str(msg.id)
+
+    async with data_lock:
+        sales_messages = DATA.setdefault("sales_messages", [])
+        if mid in sales_messages:
+            return
+
+        sales_messages.append(mid)
+        DATA["sales_messages"] = sales_messages[-5000:]
+
+        m = md(msg.author.id)
+        m["sales_week"] += 1
+        m["bows"] += 1
+        sales = m["sales_week"]
+        bows = m["bows"]
+        save()
+
+    await temp_message(
+        msg.channel,
+        f"🎀 {msg.author.mention} **+1 vente !**\n"
+        f"🛍️ Tu es maintenant à*{sales} vente(s)** cette semaine.\n"
+        f"🎀 *+1 nœud gagné* — tu en as *{bows}*."
+    )
 
 # ============================================================
 # STATS
 # ============================================================
 
-async def stats(user):
+async def send_stats(member):
+    m = md(member.id)
 
-    m=md(user.id)
-
-    c=rem(m["crown_until"])
-    d=rem(m["diamond_until"])
-    a=rem(m["birthday_until"])
-
-    if m["pp_week"]>=6:
-        status="✅ Validée"
-    else:
-        status=(
-            f"🌸 En cours "
-            f"({m['pp_week']}/6)"
-        )
-
-    text=(
-        f"📊 **Tes statistiques Lady**\n\n"
-        f"📅 Semaine : **{status}**\n"
-        f"💗 Participations : **{m['pp_week']}**\n"
-        f"🏆 Record : **{m['record']}**\n"
+    text = (
+        "*TES STATS LADY*** 🌸\n\n"
+        f"💗 Participations :*{m['pp_week']} PP** cette semaine\n"
+        f"🏆 Record : **{m['pp_record']} PP**\n"
         f"⚠️ Avertissements : **{m['warnings']}/3**\n"
         f"🎁 Cadeaux : **{m['gifts']}**\n"
         f"🎀 Nœuds : **{m['bows']}**\n"
-        f"👑 Couronne : **{'active — '+c if c else 'inactive'}**\n"
-        f"💎 Diamant : **{'actif — '+d if d else 'inactif'}**\n"
-        f"🎂 Anniversaire : **{'actif — '+a if a else 'inactif'}**\n"
-        f"🛍️ Ventes semaine : *{m['sales_week']}*"
+        f"👑 Couronne : **{remaining(m.get('crown_until'))}**\n"
+        f"💎 Diamant : **{remaining(m.get('diamond_until'))}**\n"
+        f"🎂 Anniversaire : **{remaining(m.get('birthday_until'))}**\n"
+        f"🛍️ Ventes semaine : **{m['sales_week']}**\n\n"
+        f"🌷 Semaine :*{'VALIDÉE ✅' if m['pp_week'] >= 6 else 'À FAIRE 🌸'}**"
     )
 
     try:
-        await user.send(text)
-
+        await member.send(text)
     except discord.Forbidden:
         pass
 
-
 # ============================================================
-# VENTES
-# UNE CAPTURE = UNE VENTE
+# COMMANDES ADMIN
 # ============================================================
 
-async def sale(msg):
+def admin(ctx):
+    return bool(ctx.guild and ctx.author.guild_permissions.administrator)
 
-    mid=str(msg.id)
+@bot.command()
+async def troc(ctx, member: discord.Member, gifts: int):
+    if not admin(ctx):
+        return
+    if gifts != 6:
+        await ctx.send("Troc prévu *6 🎁 = 1 🎀***.")
+        return
 
-    async with lock:
-
-        if mid in DATA["sales_messages"]:
-            return False
-
-        DATA["sales_messages"].append(mid)
-
-        m=md(msg.author.id)
-
-        m["sales_week"]+=1
-        m["bows"]+=1
-
-        sales=m["sales_week"]
-        bows=m["bows"]
-
+    async with data_lock:
+        m = md(member.id)
+        if m["gifts"] < 6:
+            await ctx.send("Pas assez de 🎁.")
+            return
+        m["gifts"] -= 6
+        m["bows"] += 1
         save()
 
-    await temp_message(
-        msg.channel,
-        (
-            f"🎀 {msg.author.mention} **+1 vente !**\n"
-            f"🛍️ Tu es maintenant à "
-            f"*{sales} vente(s) cette semaine*.\n"
-            f"🎀 *+1 nœud gagné* — "
-            f"tu en as *{bows}*."
-        ),
-        15
-    )
+    await ctx.send(f"🎀 {member.mention} *6 🎁 → 1 🎀***.")
 
-    return True
-
-
-# ============================================================
-# PARTICIPATIONS
-# ============================================================
-
-async def participation(msg):
-
-    global session
-
-    s=session
-
-    if not s:
+@bot.command()
+async def absence(ctx, member: discord.Member, debut: str, fin: str):
+    if not admin(ctx):
         return
 
-    uid=msg.author.id
-    text=msg.content or ""
-    m=md(uid)
+    async with data_lock:
+        DATA.setdefault("absences", {})[str(member.id)] = {
+            "debut": debut,
+            "fin": fin,
+        }
+        save()
 
-    # -------------------------
-    # MEGA BOOST
-    # -------------------------
+    await ctx.send(f"💌 Absence enregistrée pour {member.mention}.")
 
-    if s["kind"]=="mega":
+@bot.command()
+async def absences(ctx):
+    if not admin(ctx):
+        return
 
-        if any(
-            x in text
-            for x in "🎁🎀👑💎"
-        ):
-            return
+    abs_data = DATA.setdefault("absences", {})
+    if not abs_data:
+        await ctx.send("💌 Aucune absence enregistrée.")
+        return
 
-        if uid in s["normal"]:
-            return
-
-        s["normal"].add(uid)
-        s["participants"].add(uid)
-
-        await pp(msg.author)
-
-        current=md(uid)["pp_week"]
-
-        await temp_message(
-            msg.channel,
-            (
-                f"💗 {msg.author.mention} "
-                f"*+1 PP* — tu es maintenant à "
-                f"*{current}/6 PP* cette semaine."
-            ),
-            15
+    lines = []
+    for uid, info in abs_data.items():
+        lines.append(
+            f"<@{uid}> : *{info.get('debut', '?')} → {info.get('fin', '?')}*"
         )
-
-        return
-
-    # -------------------------
-    # CADEAU
-    # -------------------------
-
-    if "🎁" in text:
-
-        async with lock:
-
-            m=md(uid)
-
-            if m["gifts"]>0:
-                m["gifts"]-=1
-                save()
-
-        return
-
-    # -------------------------
-    # NOEUD
-    # -------------------------
-
-    if "🎀" in text:
-
-        async with lock:
-
-            m=md(uid)
-
-            if m["bows"]>0:
-                m["bows"]-=1
-                save()
-
-        return
-
-    # -------------------------
-    # COURONNE / DIAMANT
-    # -------------------------
-
-    if "👑" in text or "💎" in text:
-        return
-
-    # -------------------------
-    # LIEN DEJA FAIT
-    # -------------------------
-
-    if uid in s["normal"]:
-
-        if m["gifts"]>0:
-
-            try:
-                await msg.author.send(
-                    "🎁 Ton lien supplémentaire "
-                    "n'a pas été validé : "
-                    "tu as oublié 🎁. "
-                    "Ton cadeau reste disponible."
-                )
-
-            except Exception:
-                pass
-
-        return
-
-    # -------------------------
-    # PARTICIPATION NORMALE
-    # -------------------------
-
-    s["normal"].add(uid)
-    s["participants"].add(uid)
-
-    await pp(msg.author)
-
-    current=md(uid)["pp_week"]
-
-    await temp_message(
-        msg.channel,
-        (
-            f"💗 {msg.author.mention} "
-            f"*+1 PP* — tu es maintenant à "
-            f"*{current}/6 PP* cette semaine."
-        ),
-        15
-    )
-
+    await ctx.send("💌 **Absences enregistrées**\n" + "\n".join(lines))
 
 # ============================================================
-# MESSAGES DISCORD
+# EVENEMENTS
 # ============================================================
 
 @bot.event
 async def on_message(msg):
-
     if msg.author.bot:
         return
 
-    # STATS EN MP
-    if (
-        (msg.content or "")
-        .strip()
-        .lower()
-        =="lady_stat"
-    ):
-        await stats(msg.author)
+    # lady_stat reste une commande texte spéciale en MP.
+    if (msg.content or "").strip().lower() == "lady_stat":
+        await send_stats(msg.author)
         return
 
-    # VENTES :
-    # AU MOINS UNE PIECE JOINTE = UNE VENTE
-    if (
-        msg.channel.id==SALON_VENTES_ID
-        and msg.attachments
-    ):
+    # Une capture dans le salon ventes = une vente.
+    if msg.channel.id == SALON_VENTES_ID and msg.attachments:
         await sale(msg)
 
-    # PARTICIPATIONS
+    # Liens Vinted pendant une session.
     if (
-        msg.channel.id==SALON_SESSIONS_ID
+        msg.channel.id == SALON_SESSIONS_ID
         and session
-        and VINTED.search(
-            msg.content or ""
-        )
+        and VINTED.search(msg.content or "")
     ):
         await participation(msg)
 
     await bot.process_commands(msg)
 
-
-# ============================================================
-# ADMIN
-# ============================================================
-
-def admin(ctx):
-    return (
-        ctx.author
-        .guild_permissions
-        .administrator
-    )
-
-
-# ============================================================
-# TROC
-# ============================================================
-
-@bot.command()
-async def lady_troc(
-    ctx,
-    member:discord.Member,
-    gifts:int
-):
-
-    if not admin(ctx):
-        return
-
-    if gifts!=6:
-        return await ctx.send(
-            "Troc prévu *6 🎁 = 1 🎀***."
-        )
-
-    async with lock:
-
-        m=md(member.id)
-
-        if m["gifts"]<6:
-            return await ctx.send(
-                "Pas assez de 🎁."
-            )
-
-        m["gifts"]-=6
-        m["bows"]+=1
-
-        save()
-
-    await ctx.send(
-        f"🎀 {member.mention} : "
-        "6 🎁 → 1 🎀."
-    )
-
-
-# ============================================================
-# ABSENCES
-# ============================================================
-
-@bot.command()
-async def lady_absence(
-    ctx,
-    member:discord.Member,
-    debut:str,
-    fin:str
-):
-
-    if not admin(ctx):
-        return
-
-    DATA["absences"][
-        str(member.id)
-    ]={
-        "debut":debut,
-        "fin":fin
-    }
-
-    save()
-
-    await ctx.send(
-        f"🏖️ Absence enregistrée "
-        f"pour {member.mention}."
-    )
-
-
-# ============================================================
-# READY
-# ============================================================
-
 @bot.event
 async def on_ready():
-
-    print(
-        f"Lady connectée : "
-        f"{bot.user} ({bot.user.id})"
-    )
+    print(f"Lady connectée : {bot.user} ({bot.user.id})")
+    print(f"Fichier de données : {DATA_FILE}")
 
     if not scheduler.is_running():
         scheduler.start()
-
 
 # ============================================================
 # LANCEMENT
