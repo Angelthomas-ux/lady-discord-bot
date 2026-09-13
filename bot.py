@@ -93,6 +93,7 @@ def load_data():
 
 
 DATA = load_data()
+DATA.setdefault("birthdays", {})
 
 
 def save():
@@ -657,10 +658,10 @@ async def participation(msg):
     kind = session["kind"]
 
     if kind == "mega":
-        if any(x in content for x in ("🎁", "🎀", "👑", "💎")):
+        if any(x in content for x in ("🎁", "🎀", "👑", "💎", "🎂")):
             await temp_message(
                 msg.channel,
-                f"🚀 {msg.author.mention} aucun bonus 🎁 🎀 👑 💎 n'est utilisable pendant le Méga Boost."
+                f"🚀 {msg.author.mention} aucun bonus 🎁 🎀 👑 💎 🎂 n'est utilisable pendant le Méga Boost."
             )
             return
 
@@ -711,6 +712,14 @@ async def participation(msg):
                 return
             session["links"][msg.id] = uid
             asyncio.create_task(temp_message(msg.channel, f"👑 {msg.author.mention} lien bonus Couronne validé."))
+            return
+
+        if has_bonus_marker(content, "🎂"):
+            if not active_until(m.get("birthday_until")):
+                asyncio.create_task(temp_message(msg.channel, f"🎂 {msg.author.mention} ton bonus anniversaire n'est pas actif."))
+                return
+            session["links"][msg.id] = uid
+            asyncio.create_task(temp_message(msg.channel, f"🎂 {msg.author.mention} lien bonus Anniversaire validé."))
             return
 
         if has_bonus_marker(content, "💎"):
@@ -1123,6 +1132,62 @@ async def before_quiz_scheduler():
     await bot.wait_until_ready()
 
 # ============================================================
+# ANNIVERSAIRES
+# ============================================================
+
+@tasks.loop(minutes=1)
+async def birthday_scheduler():
+    n = now()
+    # Une seule vérification utile au début de la journée ; la clé évite tout doublon.
+    if n.hour != 0 or n.minute > 2:
+        return
+
+    channel = bot.get_channel(SALON_ANNIVERSAIRES_ID)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(SALON_ANNIVERSAIRES_ID)
+        except Exception as exc:
+            print("Salon anniversaires inaccessible :", exc)
+            return
+
+    birthdays = dict(DATA.setdefault("birthdays", {}))
+    for uid, info in birthdays.items():
+        try:
+            day = int(info.get("day"))
+            month = int(info.get("month"))
+        except Exception:
+            continue
+        if day != n.day or month != n.month:
+            continue
+
+        key = f"{n.date().isoformat()}|{uid}"
+        async with data_lock:
+            claims = DATA.setdefault("birthday_claims", [])
+            if key in claims:
+                continue
+            claims.append(key)
+            DATA["birthday_claims"] = claims[-500:]
+            m = md(uid)
+            m["birthday_until"] = (n + timedelta(hours=24)).isoformat()
+            save()
+
+        try:
+            await channel.send(
+                f"@everyone 🎂 **Joyeux anniversaire <@{uid}> !** 🥳\\n"
+                "Ton bonus 🎂 est actif pendant **24 heures** : "
+                "**1 lien supplémentaire par session normale**.\\n"
+                "🚀 Le bonus anniversaire n'est pas utilisable pendant les Méga Boost."
+            )
+        except Exception as exc:
+            print("Message anniversaire impossible :", exc)
+
+
+@birthday_scheduler.before_loop
+async def before_birthday_scheduler():
+    await bot.wait_until_ready()
+
+
+# ============================================================
 # STATS
 # ============================================================
 
@@ -1197,6 +1262,64 @@ async def avertissement_enlever(ctx, member: discord.Member):
     )
 
 
+def parse_birthday_date(value):
+    value = (value or "").strip()
+    for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%d/%m", "%d-%m"):
+        try:
+            d = datetime.strptime(value, fmt)
+            return d.day, d.month
+        except ValueError:
+            pass
+    return None
+
+
+@bot.command(name="anniversaire")
+async def anniversaire(ctx, member: discord.Member, date_anniversaire: str):
+    if not admin(ctx):
+        return
+    parsed = parse_birthday_date(date_anniversaire)
+    if not parsed:
+        await ctx.send("🎂 Format attendu : `lady_anniversaire @membre JJ/MM`.")
+        return
+    day, month = parsed
+    async with data_lock:
+        DATA.setdefault("birthdays", {})[str(member.id)] = {"day": day, "month": month}
+        save()
+    await ctx.send(f"🎂 Anniversaire de {member.mention} enregistré au **{day:02d}/{month:02d}**.")
+
+
+@bot.command(name="anniversaire_enlever")
+async def anniversaire_enlever(ctx, member: discord.Member):
+    if not admin(ctx):
+        return
+    async with data_lock:
+        existed = DATA.setdefault("birthdays", {}).pop(str(member.id), None)
+        md(member.id)["birthday_until"] = None
+        save()
+    if existed:
+        await ctx.send(f"🎂 Anniversaire de {member.mention} supprimé.")
+    else:
+        await ctx.send(f"🎂 Aucun anniversaire enregistré pour {member.mention}.")
+
+
+@bot.command(name="anniversaires")
+async def anniversaires(ctx):
+    if not admin(ctx):
+        return
+    birthdays = DATA.setdefault("birthdays", {})
+    if not birthdays:
+        await ctx.send("🎂 Aucun anniversaire enregistré.")
+        return
+    rows = []
+    for uid, info in birthdays.items():
+        rows.append((int(info.get("month", 0)), int(info.get("day", 0)), uid))
+    rows.sort()
+    text = ["🎂 **Anniversaires enregistrés**"]
+    for month, day, uid in rows:
+        text.append(f"<@{uid}> — **{day:02d}/{month:02d}**")
+    await ctx.send("\\n".join(text))
+
+
 @bot.command()
 async def absence(ctx, member: discord.Member, debut: str, fin: str):
     if not admin(ctx):
@@ -1237,6 +1360,34 @@ async def on_message(msg):
     if (msg.content or "").strip().lower() == "lady_stat":
         await send_stats(msg.author)
         return
+
+    # Dans le salon Anniversaires, chaque membre peut simplement écrire sa date
+    # (ex. 25/08 ou "25/08/1992"). Lady l'enregistre automatiquement.
+    if msg.channel.id == SALON_ANNIVERSAIRES_ID:
+        content = (msg.content or "").strip()
+        match = re.search(r"(?<!\\d)([0-3]?\\d)[/-]([01]?\\d)(?:[/-]\\d{2,4})?(?!\\d)", content)
+        if match:
+            try:
+                day = int(match.group(1))
+                month = int(match.group(2))
+                # Validation réelle de la date (année bissextile pour accepter 29/02).
+                datetime(2024, month, day)
+            except ValueError:
+                await temp_message(msg.channel, f"🎂 {msg.author.mention} cette date n'est pas valide.")
+                return
+
+            async with data_lock:
+                DATA.setdefault("birthdays", {})[str(msg.author.id)] = {
+                    "day": day,
+                    "month": month,
+                }
+                save()
+
+            await msg.channel.send(
+                f"🎂 {msg.author.mention}, ton anniversaire du **{day:02d}/{month:02d}** "
+                "est bien enregistré !"
+            )
+            return
 
     if msg.channel.id == SALON_VENTES_ID and msg.attachments:
         await sale(msg)
@@ -1365,6 +1516,8 @@ async def on_ready():
         weekly_scheduler.start()
     if not quiz_scheduler.is_running():
         quiz_scheduler.start()
+    if not birthday_scheduler.is_running():
+        birthday_scheduler.start()
 
     # Parrainage initialisé ensuite pour ne jamais bloquer les sessions/PP.
     for guild in bot.guilds:
