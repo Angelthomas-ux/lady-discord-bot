@@ -276,6 +276,16 @@ async def begin_session(name, start, end, kind, is_free=False):
         "no_return_links": set(),
     }
 
+    # Garde la session active en mémoire persistante : si Railway redémarre,
+    # Lady sait encore quelle image STOP envoyer.
+    async with data_lock:
+        DATA["active_session"] = {
+            "name": name,
+            "end": end.isoformat(),
+            "kind": kind,
+        }
+        save()
+
     start_img = SESSION_IMAGES.get(name, (None, None))[0]
     if start_img:
         await send_image(channel, start_img)
@@ -309,8 +319,13 @@ async def begin_session(name, start, end, kind, is_free=False):
 
 
 async def member_has_returned(member, old_session, channel):
-    # Un membre est à jour s'il a réagi à tous les liens normaux des autres.
-    # Les liens 🎀 sont à rendre par les autres, mais leur propriétaire n'a rien à rendre pour ce lien.
+    # 🎀 = lien sans rendre : son propriétaire est exempté de rendu pour cette session.
+    no_return_links = old_session.get("no_return_links", set())
+    links = old_session.get("links", {})
+    if any(links.get(message_id) == member.id for message_id in no_return_links):
+        return True
+
+    # Sinon, le membre doit avoir réagi aux liens des autres participantes.
     required_message_ids = []
     for message_id, owner_id in old_session.get("links", {}).items():
         if owner_id != member.id:
@@ -430,6 +445,10 @@ async def finish_session():
     if stop_img:
         await send_image(channel, stop_img)
 
+    async with data_lock:
+        DATA.pop("active_session", None)
+        save()
+
     participants = list(old["participants"])
     await channel.send(
         f"⛔ **Fin de {old['name']}**\n"
@@ -545,7 +564,7 @@ async def before_scheduler():
 # MESSAGES TEMPORAIRES
 # ============================================================
 
-async def temp_message(channel, text, seconds=15):
+async def temp_message(channel, text, seconds=3):
     try:
         msg = await channel.send(text)
         await asyncio.sleep(seconds)
@@ -622,7 +641,10 @@ async def award_pp(member):
 
 
 def has_bonus_marker(content, marker):
-    return marker in (content or "")
+    # Discord/mobile peut ajouter le sélecteur emoji U+FE0F.
+    clean = (content or "").replace("\ufe0f", "")
+    wanted = marker.replace("\ufe0f", "")
+    return wanted in clean
 
 
 async def participation(msg):
@@ -1136,24 +1158,43 @@ def admin(ctx):
 
 
 @bot.command()
-async def troc(ctx, member: discord.Member, gifts: int):
+async def troc(ctx, member: discord.Member):
     if not admin(ctx):
-        return
-
-    if gifts != 6:
-        await ctx.send("Troc prévu *6 🎁 = 1 🎀***.")
         return
 
     async with data_lock:
         m = md(member.id)
-        if m["gifts"] < 6:
-            await ctx.send("Pas assez de 🎁.")
+        if m["gifts"] < 5:
+            await ctx.send(f"🎁 {member.mention} n'a pas assez de cadeaux : **{m['gifts']}/5**.")
             return
-        m["gifts"] -= 6
+        m["gifts"] -= 5
         m["bows"] += 1
+        gifts_left = m["gifts"]
+        bows = m["bows"]
         save()
 
-    await ctx.send(f"🎀 {member.mention} *6 🎁 → 1 🎀***.")
+    await ctx.send(
+        f"🎀 {member.mention} : **5 🎁 → 1 🎀**. "
+        f"Il reste **{gifts_left} 🎁** et **{bows} 🎀**."
+    )
+
+
+@bot.command(name="avertissement_enlever")
+async def avertissement_enlever(ctx, member: discord.Member):
+    if not admin(ctx):
+        return
+
+    async with data_lock:
+        m = md(member.id)
+        before = int(m.get("warnings", 0))
+        m["warnings"] = max(0, before - 1)
+        warnings = m["warnings"]
+        save()
+
+    await ctx.send(
+        f"⚠️ {member.mention} : **-1 avertissement**. "
+        f"Il/elle est maintenant à **{warnings}/3**."
+    )
 
 
 @bot.command()
@@ -1215,10 +1256,34 @@ async def on_message(msg):
     await bot.process_commands(msg)
 
 
+
+async def recover_stop_after_restart():
+    info = DATA.get("active_session")
+    if not isinstance(info, dict):
+        return
+    name = info.get("name")
+    end = parse_dt(info.get("end"))
+    if not name or not end or end > now():
+        return
+    channel = bot.get_channel(SALON_SESSIONS_ID)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(SALON_SESSIONS_ID)
+        except Exception:
+            return
+    stop_img = SESSION_IMAGES.get(name, (None, None))[1]
+    if stop_img:
+        await send_image(channel, stop_img)
+    async with data_lock:
+        DATA.pop("active_session", None)
+        save()
+
 @bot.event
 async def on_ready():
     print(f"Lady connectée : {bot.user} ({bot.user.id})")
     print(f"Fichier de données : {DATA_FILE}")
+
+    await recover_stop_after_restart()
 
     # Démarrage immédiat des fonctions principales.
     if not scheduler.is_running():
