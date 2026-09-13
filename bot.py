@@ -1220,15 +1220,20 @@ async def on_ready():
     print(f"Lady connectée : {bot.user} ({bot.user.id})")
     print(f"Fichier de données : {DATA_FILE}")
 
-    for guild in bot.guilds:
-        await refresh_invites(guild)
-
+    # Démarrage immédiat des fonctions principales.
     if not scheduler.is_running():
         scheduler.start()
     if not weekly_scheduler.is_running():
         weekly_scheduler.start()
     if not quiz_scheduler.is_running():
         quiz_scheduler.start()
+
+    # Parrainage initialisé ensuite pour ne jamais bloquer les sessions/PP.
+    for guild in bot.guilds:
+        try:
+            await refresh_invites(guild)
+        except Exception as exc:
+            print("Initialisation invitations impossible:", exc)
 
 # ============================================================
 # LANCEMENT
