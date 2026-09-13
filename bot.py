@@ -1278,12 +1278,85 @@ async def recover_stop_after_restart():
         DATA.pop("active_session", None)
         save()
 
+
+# ============================================================
+# CORRECTIF UNIQUE DU 13/09/2026 — REMISE À ZÉRO DES BONUS
+# Conserve uniquement les 🎀 gagnés lors de la clôture qui vient d'avoir lieu.
+# Le message de clôture dans le salon discussion permet de retrouver les gagnantes :
+# 1 🎀 pour meilleure participation + 1 🎀 pour meilleure vente (cumul possible).
+# ============================================================
+
+async def cleanup_bonus_once_2026_09_13():
+    cleanup_key = "bonus_cleanup_2026-09-13_done"
+
+    async with data_lock:
+        if DATA.get(cleanup_key):
+            return
+
+    discussion = bot.get_channel(SALON_DISCUSSION_ID)
+    if discussion is None:
+        try:
+            discussion = await bot.fetch_channel(SALON_DISCUSSION_ID)
+        except Exception as exc:
+            print("Correctif bonus : salon discussion inaccessible :", exc)
+            return
+
+    fresh_bows = {}
+    closure_message_found = False
+
+    try:
+        async for message in discussion.history(limit=100):
+            if message.author.id != bot.user.id:
+                continue
+            content = message.content or ""
+            if "Mise à jour hebdomadaire Lady terminée" not in content:
+                continue
+
+            closure_message_found = True
+
+            for line in content.splitlines():
+                if "Meilleure(s) participation(s)" in line or "Meilleure(s) vendeuse(s)" in line:
+                    for member in message.mentions:
+                        if member.mention in line:
+                            fresh_bows[member.id] = fresh_bows.get(member.id, 0) + 1
+            break
+    except Exception as exc:
+        print("Correctif bonus : lecture du message de clôture impossible :", exc)
+        return
+
+    # Sécurité : on ne touche pas aux nœuds si le message de clôture n'a pas été retrouvé.
+    if not closure_message_found:
+        print("Correctif bonus : message de clôture introuvable, aucun reset effectué.")
+        return
+
+    async with data_lock:
+        for member in bot.get_all_members():
+            if member.bot:
+                continue
+            m = md(member.id)
+
+            # Tous les anciens bonus repartent à zéro.
+            m["gifts"] = 0
+            m["crown_until"] = None
+            m["diamond_until"] = None
+
+            # Les seuls nœuds conservés sont ceux gagnés à la clôture de ce soir.
+            # Une même personne peut en conserver 2 si elle a gagné les deux classements.
+            m["bows"] = fresh_bows.get(member.id, 0)
+
+        DATA[cleanup_key] = True
+        save()
+
+    print("Correctif bonus du 13/09/2026 appliqué une seule fois.")
+
+
 @bot.event
 async def on_ready():
     print(f"Lady connectée : {bot.user} ({bot.user.id})")
     print(f"Fichier de données : {DATA_FILE}")
 
     await recover_stop_after_restart()
+    await cleanup_bonus_once_2026_09_13()
 
     # Démarrage immédiat des fonctions principales.
     if not scheduler.is_running():
