@@ -1365,7 +1365,7 @@ async def on_message(msg):
     # (ex. 25/08 ou "25/08/1992"). Lady l'enregistre automatiquement.
     if msg.channel.id == SALON_ANNIVERSAIRES_ID:
         content = (msg.content or "").strip()
-        match = re.search(r"(?<!\\d)([0-3]?\\d)[/-]([01]?\\d)(?:[/-]\\d{2,4})?(?!\\d)", content)
+        match = re.search(r"(?<!\d)([0-3]?\d)[/-]([01]?\d)(?:[/-]\d{2,4})?(?!\d)", content)
         if match:
             try:
                 day = int(match.group(1))
@@ -1501,6 +1501,38 @@ async def cleanup_bonus_once_2026_09_13():
     print("Correctif bonus du 13/09/2026 appliqué une seule fois.")
 
 
+
+async def fix_new_week_green_roles_once():
+    key = "fix_green_roles_2026-09-14_done"
+    async with data_lock:
+        if DATA.get(key):
+            return
+
+    changed = 0
+    for guild in bot.guilds:
+        green_role = discord.utils.get(guild.roles, name="✅ À JOUR")
+        pink_role = discord.utils.get(guild.roles, name="🌸 SEMAINE À FAIRE")
+        if green_role is None or pink_role is None:
+            continue
+
+        for member in guild.members:
+            if member.bot:
+                continue
+            m = md(member.id)
+            if int(m.get("pp_week", 0)) == 0 and green_role in member.roles:
+                try:
+                    await member.remove_roles(green_role, reason="Lady : nouvelle semaine")
+                    await member.add_roles(pink_role, reason="Lady : nouvelle semaine")
+                    changed += 1
+                except Exception as exc:
+                    print(f"Rôle nouvelle semaine impossible pour {member}: {exc}")
+
+    async with data_lock:
+        DATA[key] = True
+        save()
+    print(f"Correction nouvelle semaine : {changed} membre(s) vert -> rose.")
+
+
 @bot.event
 async def on_ready():
     print(f"Lady connectée : {bot.user} ({bot.user.id})")
@@ -1508,6 +1540,7 @@ async def on_ready():
 
     await recover_stop_after_restart()
     await cleanup_bonus_once_2026_09_13()
+    await fix_new_week_green_roles_once()
 
     # Démarrage immédiat des fonctions principales.
     if not scheduler.is_running():
