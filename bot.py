@@ -64,6 +64,9 @@ def fresh_data():
         "weekly_closures": [],
         "sponsor_joins": [],
         "quiz_claims": [],
+        "sales_daily": {},
+        "sales_monthly": {},
+        "monthly_sales_announced": [],
     }
 
 
@@ -85,6 +88,9 @@ def load_data():
         raw.setdefault("weekly_closures", [])
         raw.setdefault("sponsor_joins", [])
         raw.setdefault("quiz_claims", [])
+        raw.setdefault("sales_daily", {})
+        raw.setdefault("sales_monthly", {})
+        raw.setdefault("monthly_sales_announced", [])
         return raw
 
     except Exception as exc:
@@ -748,6 +754,11 @@ async def participation(msg):
 
 async def sale(msg):
     mid = str(msg.id)
+    n = now()
+    day_key = n.date().isoformat()
+    month_key = n.strftime("%Y-%m")
+    uid = str(msg.author.id)
+
     async with data_lock:
         sales_messages = DATA.setdefault("sales_messages", [])
         if mid in sales_messages:
@@ -759,16 +770,36 @@ async def sale(msg):
         m = md(msg.author.id)
         m["sales_week"] += 1
         m["bows"] += 1
-        sales = m["sales_week"]
         bows = m["bows"]
+
+        daily = DATA.setdefault("sales_daily", {}).setdefault(day_key, {})
+        daily[uid] = int(daily.get(uid, 0)) + 1
+
+        monthly = DATA.setdefault("sales_monthly", {}).setdefault(month_key, {})
+        monthly[uid] = int(monthly.get(uid, 0)) + 1
+
+        member_today = daily[uid]
+        total_today = sum(int(v) for v in daily.values())
+        ranking = sorted(daily.items(), key=lambda item: (-int(item[1]), item[0]))[:5]
         save()
 
-    await temp_message(
-        msg.channel,
-        f"🎀 {msg.author.mention} **+1 vente !**\n"
-        f"🛍️ Tu es maintenant à*{sales} vente(s)** cette semaine.\n"
-        f"🎀 *+1 nœud gagné* — tu en as *{bows}*."
-    )
+    lines = [
+        f"🎀 {msg.author.mention} **vente enregistrée ✅**",
+        f"💶 Tes ventes aujourd’hui : **{member_today}**",
+        f"🎀 Nœuds : **{bows}**",
+        "",
+        f"🤑 Total ventes aujourd’hui : **{total_today}**",
+        "",
+        "🏆 **Top ventes du jour**",
+    ]
+    for pos, (member_id, count) in enumerate(ranking, start=1):
+        member = msg.guild.get_member(int(member_id)) if msg.guild else None
+        name = member.display_name if member else f"<@{member_id}>"
+        lines.append(f"**{pos}.** {name} — **{count} vente(s)**")
+
+    # Le récap des ventes reste visible dans le salon des ventes.
+    await msg.channel.send("\n".join(lines))
+
 
 # ============================================================
 # CLÔTURE HEBDOMADAIRE — DIMANCHE 23H50
@@ -908,6 +939,67 @@ async def weekly_scheduler():
 @weekly_scheduler.before_loop
 async def before_weekly_scheduler():
     await bot.wait_until_ready()
+
+# ============================================================
+# BILAN MENSUEL DES VENTES
+# ============================================================
+
+def previous_month_key(n):
+    first = n.replace(day=1)
+    previous = first - timedelta(days=1)
+    return previous.strftime("%Y-%m"), previous.strftime("%m/%Y")
+
+
+@tasks.loop(minutes=1)
+async def monthly_sales_scheduler():
+    n = now()
+    # À 00:01 le 1er du mois, le mois précédent est définitivement terminé.
+    if n.day != 1 or n.hour != 0 or n.minute > 2:
+        return
+
+    month_key, label = previous_month_key(n)
+    claim = f"monthly-sales|{month_key}"
+
+    async with data_lock:
+        announced = DATA.setdefault("monthly_sales_announced", [])
+        if claim in announced:
+            return
+
+        month_data = dict(DATA.setdefault("sales_monthly", {}).get(month_key, {}))
+        total = sum(int(v) for v in month_data.values())
+        ranking = sorted(month_data.items(), key=lambda item: (-int(item[1]), item[0]))[:5]
+
+        announced.append(claim)
+        DATA["monthly_sales_announced"] = announced[-120:]
+        save()
+
+    channel = bot.get_channel(SALON_VENTES_ID)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(SALON_VENTES_ID)
+        except Exception as exc:
+            print("Salon ventes inaccessible pour bilan mensuel :", exc)
+            return
+
+    lines = [
+        f"📅 **Bilan des ventes — {label}**",
+        f"🛍️ Le groupe a réalisé **{total} vente(s)** pendant le mois.",
+    ]
+    if ranking:
+        lines += ["", "🏆 **Top ventes du mois**"]
+        guild = channel.guild
+        for pos, (member_id, count) in enumerate(ranking, start=1):
+            member = guild.get_member(int(member_id)) if guild else None
+            name = member.display_name if member else f"<@{member_id}>"
+            lines.append(f"**{pos}.** {name} — **{count} vente(s)**")
+
+    await channel.send("\n".join(lines))
+
+
+@monthly_sales_scheduler.before_loop
+async def before_monthly_sales_scheduler():
+    await bot.wait_until_ready()
+
 
 # ============================================================
 # PARRAINAGE — +1 🎀 PAR NOUVELLE ARRIVÉE
@@ -1547,6 +1639,8 @@ async def on_ready():
         scheduler.start()
     if not weekly_scheduler.is_running():
         weekly_scheduler.start()
+    if not monthly_sales_scheduler.is_running():
+        monthly_sales_scheduler.start()
     if not quiz_scheduler.is_running():
         quiz_scheduler.start()
     if not birthday_scheduler.is_running():
