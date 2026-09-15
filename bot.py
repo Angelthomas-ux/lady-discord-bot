@@ -21,7 +21,6 @@ SALON_VENTES_ID = 1528658847806390382
 SALON_JEU_ID = 1541713193762820106
 SALON_DISCUSSION_ID = 1528130797029167134
 SALON_ANNIVERSAIRES_ID = 1541680943583068200
-SALON_GROUPE_SESSION_ID = 1549453941367111690
 
 ROLE_ROSE = "🌸 SEMAINE À FAIRE"
 ROLE_VERT = "✅ À JOUR"
@@ -68,7 +67,6 @@ def fresh_data():
         "sales_daily": {},
         "sales_monthly": {},
         "monthly_sales_announced": [],
-        "group_session_chain": [],
     }
 
 
@@ -93,7 +91,6 @@ def load_data():
         raw.setdefault("sales_daily", {})
         raw.setdefault("sales_monthly", {})
         raw.setdefault("monthly_sales_announced", [])
-        raw.setdefault("group_session_chain", [])
         return raw
 
     except Exception as exc:
@@ -103,7 +100,6 @@ def load_data():
 
 DATA = load_data()
 DATA.setdefault("birthdays", {})
-DATA.setdefault("group_session_chain", [])
 
 
 def save():
@@ -287,8 +283,6 @@ async def begin_session(name, start, end, kind, is_free=False):
         "no_return_links": set(),
         "mega_10_unlocked": False,
         "mega_10_rewarded": set(),
-        "bonus_used": set(),
-        "participant_count_message_id": None,
     }
 
     # Garde la session active en mémoire persistante : si Railway redémarre,
@@ -321,8 +315,6 @@ async def begin_session(name, start, end, kind, is_free=False):
         text = f"✨ **{name}**\n⏰ Fin à *{end.strftime('%H:%M')}*."
 
     await channel.send(text)
-    counter_msg = await channel.send("👥 **Participantes : 0**")
-    session["participant_count_message_id"] = counter_msg.id
 
     if kind == "mega":
         discussion = bot.get_channel(SALON_DISCUSSION_ID)
@@ -682,29 +674,6 @@ def has_bonus_marker(content, marker):
     return wanted in clean
 
 
-async def update_participant_counter(channel):
-    """Modifie uniquement le compteur affiché sous la session."""
-    if not session:
-        return
-    message_id = session.get("participant_count_message_id")
-    if not message_id:
-        return
-    try:
-        counter = await channel.fetch_message(message_id)
-        count = len(session.get("participants", set()))
-        label = "participante" if count == 1 else "participantes"
-        await counter.edit(content=f"👥 **{count} {label}**")
-    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-        pass
-
-
-async def dm_bonus_refuse(member, texte):
-    try:
-        await member.send(f"⚠️ **Bonus refusé**\\n{texte}")
-    except Exception:
-        pass
-
-
 async def participation(msg):
     global session
     if not session:
@@ -713,7 +682,6 @@ async def participation(msg):
     uid = msg.author.id
     content = msg.content or ""
     kind = session["kind"]
-    bonus_markers = [x for x in ("🎁", "🎀", "👑", "💎", "🎂") if has_bonus_marker(content, x)]
 
     if kind == "mega":
         if any(x in content for x in ("🎁", "🎀", "👑", "💎", "🎂")):
@@ -727,7 +695,6 @@ async def participation(msg):
             session["normal"].add(uid)
             session["participants"].add(uid)
             current = await award_pp(msg.author)
-            await update_participant_counter(msg.channel)
             await temp_message(
                 msg.channel,
                 f"💗 {msg.author.mention} *+1 PP* — tu es maintenant à *{current}/6 PP* cette semaine."
@@ -761,20 +728,6 @@ async def participation(msg):
                         )
         return
 
-    if len(bonus_markers) > 1:
-        await dm_bonus_refuse(
-            msg.author,
-            "Tu ne peux utiliser qu'**un seul bonus par session**. Choisis 🎁, 🎀, 👑, 💎 ou 🎂."
-        )
-        return
-
-    if bonus_markers and uid in session["bonus_used"]:
-        await dm_bonus_refuse(
-            msg.author,
-            "Tu as déjà utilisé ton bonus pour cette session. **1 seul bonus maximum par personne et par session.** 🌸"
-        )
-        return
-
     async with data_lock:
         m = md(uid)
 
@@ -783,10 +736,8 @@ async def participation(msg):
                 asyncio.create_task(temp_message(msg.channel, f"🎀 {msg.author.mention} tu n'as pas de nœud disponible."))
                 return
             m["bows"] -= 1
-            session["bonus_used"].add(uid)
             save()
             session["participants"].add(uid)
-            await update_participant_counter(msg.channel)
             session["links"][msg.id] = uid
             session["no_return_links"].add(msg.id)
             asyncio.create_task(temp_message(
@@ -800,7 +751,6 @@ async def participation(msg):
                 asyncio.create_task(temp_message(msg.channel, f"🎁 {msg.author.mention} tu n'as pas de cadeau disponible."))
                 return
             m["gifts"] -= 1
-            session["bonus_used"].add(uid)
             save()
             session["links"][msg.id] = uid
             asyncio.create_task(temp_message(
@@ -813,7 +763,6 @@ async def participation(msg):
             if not active_until(m.get("crown_until")):
                 asyncio.create_task(temp_message(msg.channel, f"👑 {msg.author.mention} ta couronne n'est pas active."))
                 return
-            session["bonus_used"].add(uid)
             session["links"][msg.id] = uid
             asyncio.create_task(temp_message(msg.channel, f"👑 {msg.author.mention} lien bonus Couronne validé."))
             return
@@ -822,7 +771,6 @@ async def participation(msg):
             if not active_until(m.get("birthday_until")):
                 asyncio.create_task(temp_message(msg.channel, f"🎂 {msg.author.mention} ton bonus anniversaire n'est pas actif."))
                 return
-            session["bonus_used"].add(uid)
             session["links"][msg.id] = uid
             asyncio.create_task(temp_message(msg.channel, f"🎂 {msg.author.mention} lien bonus Anniversaire validé."))
             return
@@ -831,7 +779,6 @@ async def participation(msg):
             if not active_until(m.get("diamond_until")):
                 asyncio.create_task(temp_message(msg.channel, f"💎 {msg.author.mention} ton diamant n'est pas actif."))
                 return
-            session["bonus_used"].add(uid)
             session["links"][msg.id] = uid
             asyncio.create_task(temp_message(msg.channel, f"💎 {msg.author.mention} lien bonus Diamant validé."))
             return
@@ -843,150 +790,10 @@ async def participation(msg):
         session["normal"].add(uid)
         session["participants"].add(uid)
         current = await award_pp(msg.author)
-        await update_participant_counter(msg.channel)
         await temp_message(
             msg.channel,
             f"💗 {msg.author.mention} *+1 PP* — tu es maintenant à *{current}/6 PP* cette semaine."
         )
-
-
-# ============================================================
-# GROUPE SESSION — 3 LIENS AU-DESSUS
-# ============================================================
-
-def group_chain_entries():
-    chain = DATA.setdefault("group_session_chain", [])
-    if not isinstance(chain, list):
-        chain = []
-        DATA["group_session_chain"] = chain
-    return chain
-
-
-async def validate_group_session_entry(entry, channel):
-    if entry.get("validated"):
-        return False
-
-    member = channel.guild.get_member(int(entry["user_id"])) if channel.guild else None
-    if member is None:
-        return False
-
-    required_ids = [int(x) for x in entry.get("required_message_ids", [])]
-
-    for message_id in required_ids:
-        try:
-            previous = await channel.fetch_message(message_id)
-        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-            continue
-
-        reacted = False
-        for reaction in previous.reactions:
-            try:
-                async for user in reaction.users():
-                    if user.id == member.id:
-                        reacted = True
-                        break
-            except (discord.Forbidden, discord.HTTPException):
-                pass
-            if reacted:
-                break
-
-        if not reacted:
-            return False
-
-    async with data_lock:
-        persistent = next(
-            (e for e in group_chain_entries()
-             if str(e.get("message_id")) == str(entry.get("message_id"))),
-            None
-        )
-        if not persistent or persistent.get("validated"):
-            return False
-        persistent["validated"] = True
-        save()
-
-    current = await award_pp(member)
-    await temp_message(
-        channel,
-        f"💗 {member.mention} **participation validée ! +1 PP** — "
-        f"tu es maintenant à **{current}/6 PP** cette semaine."
-    )
-    return True
-
-
-async def group_session_post(msg):
-    uid = msg.author.id
-
-    async with data_lock:
-        chain = group_chain_entries()
-        last_three = chain[-3:]
-        allowed = not any(int(e.get("user_id", 0)) == uid for e in last_three)
-
-        if allowed:
-            required_ids = [str(e["message_id"]) for e in last_three]
-            entry = {
-                "message_id": str(msg.id),
-                "user_id": str(uid),
-                "required_message_ids": required_ids,
-                "validated": False,
-                "created_at": now().isoformat(),
-            }
-            chain.append(entry)
-            DATA["group_session_chain"] = chain[-1000:]
-            save()
-        else:
-            required_ids = []
-            entry = None
-
-    if not allowed:
-        try:
-            await msg.delete()
-        except (discord.Forbidden, discord.HTTPException):
-            pass
-        await temp_message(
-            msg.channel,
-            f"⏳ {msg.author.mention} tu dois attendre que **3 autres personnes** "
-            "aient posté après ton dernier lien avant de pouvoir reposter."
-        )
-        return
-
-    if not required_ids:
-        await validate_group_session_entry(entry, msg.channel)
-    else:
-        await temp_message(
-            msg.channel,
-            f"🔗 {msg.author.mention} ton passage est enregistré. "
-            f"Fais les **{len(required_ids)} lien(s) juste au-dessus** : "
-            "Lady validera automatiquement ton **+1 PP** dès que tu seras à jour."
-        )
-
-
-async def check_group_session_pending_for(user_id, channel):
-    async with data_lock:
-        pending = [
-            dict(e) for e in group_chain_entries()
-            if int(e.get("user_id", 0)) == int(user_id) and not e.get("validated")
-        ]
-
-    for entry in pending:
-        await validate_group_session_entry(entry, channel)
-
-
-@bot.event
-async def on_raw_reaction_add(payload):
-    if bot.user and payload.user_id == bot.user.id:
-        return
-    if payload.channel_id != SALON_GROUPE_SESSION_ID:
-        return
-
-    channel = bot.get_channel(payload.channel_id)
-    if channel is None:
-        try:
-            channel = await bot.fetch_channel(payload.channel_id)
-        except Exception:
-            return
-
-    await check_group_session_pending_for(payload.user_id, channel)
-
 
 # ============================================================
 # VENTES
@@ -1723,26 +1530,6 @@ async def on_message(msg):
 
     if msg.channel.id == SALON_VENTES_ID and msg.attachments:
         await sale(msg)
-
-    if (
-        msg.channel.id == SALON_GROUPE_SESSION_ID
-        and VINTED.search(msg.content or "")
-    ):
-        if any(has_bonus_marker(msg.content or "", x) for x in ("🎁", "🎀", "👑", "💎", "🎂")):
-            await dm_bonus_refuse(
-                msg.author,
-                "Aucun bonus n'est autorisé dans le salon sans session / 3 liens au-dessus. Poste uniquement ton lien normal. 🌸"
-            )
-            try:
-                await msg.delete()
-            except (discord.Forbidden, discord.HTTPException):
-                pass
-            return
-        await group_session_post(msg)
-        try:
-            await msg.edit(suppress=True)
-        except (discord.Forbidden, discord.HTTPException):
-            pass
 
     if (
         msg.channel.id == SALON_SESSIONS_ID
