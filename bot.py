@@ -281,6 +281,8 @@ async def begin_session(name, start, end, kind, is_free=False):
         "dressing_count": dressing_count,
         "links": {},
         "no_return_links": set(),
+        "mega_10_unlocked": False,
+        "mega_10_rewarded": set(),
     }
 
     # Garde la session active en mémoire persistante : si Railway redémarre,
@@ -325,23 +327,16 @@ async def begin_session(name, start, end, kind, is_free=False):
     print(f"Session lancée: {name} jusqu'à {end:%H:%M}")
 
 
-async def member_has_returned(member, old_session, channel):
-    # 🎀 = lien sans rendre : son propriétaire est exempté de rendu pour cette session.
+async def missing_return_messages(member, old_session, channel):
     no_return_links = old_session.get("no_return_links", set())
     links = old_session.get("links", {})
     if any(links.get(message_id) == member.id for message_id in no_return_links):
-        return True
+        return []
 
-    # Sinon, le membre doit avoir réagi aux liens des autres participantes.
-    required_message_ids = []
-    for message_id, owner_id in old_session.get("links", {}).items():
-        if owner_id != member.id:
-            required_message_ids.append(message_id)
-
-    if not required_message_ids:
-        return True
-
-    for message_id in required_message_ids:
+    missing = []
+    for message_id, owner_id in links.items():
+        if owner_id == member.id:
+            continue
         try:
             message = await channel.fetch_message(message_id)
         except Exception:
@@ -358,11 +353,13 @@ async def member_has_returned(member, old_session, channel):
                 pass
             if reacted:
                 break
-
         if not reacted:
-            return False
+            missing.append(message)
+    return missing
 
-    return True
+
+async def member_has_returned(member, old_session, channel):
+    return not await missing_return_messages(member, old_session, channel)
 
 
 async def return_check_after_10_minutes(old_session, channel):
@@ -370,39 +367,62 @@ async def return_check_after_10_minutes(old_session, channel):
     if key in pending_return_checks:
         return
     pending_return_checks.add(key)
-
     try:
         participants = list(old_session.get("participants", set()))
         if not participants or not old_session.get("links"):
             return
 
-        not_ready = []
+        waiting = {}
         for uid in participants:
             member = channel.guild.get_member(uid)
             if not member:
                 continue
-            if not await member_has_returned(member, old_session, channel):
-                not_ready.append(member)
+            missing = await missing_return_messages(member, old_session, channel)
+            if not missing:
+                continue
 
-        # MP immédiat à la fin de session.
-        for member in not_ready:
+            waiting[uid] = member
+            jump_links = "\\n".join(f"🔗 {message.jump_url}" for message in missing)
             try:
                 await member.send(
-                    "⚠️ **Rappel Lady**\n"
-                    "La session vient de se terminer et tu n'as pas encore rendu toutes tes participations.\n"
-                    "⏰ Il te reste **10 minutes** pour te mettre à jour avant l'avertissement."
+                    f"⚠️ **{old_session['name']} terminée**\\n\\n"
+                    f"Tu n'es pas encore à jour ! Il te manque **{len(missing)} lien(s)**.\\n"
+                    "Tu as **10 minutes** pour te mettre à jour, sinon tu recevras un avertissement.\\n\\n"
+                    f"**Liste des liens manquants :**\\n{jump_links}"
                 )
             except Exception:
                 pass
 
-        await asyncio.sleep(600)
+        if not waiting:
+            return
 
-        for member in not_ready:
-            # On revérifie réellement après les 10 minutes.
+        deadline = now() + timedelta(minutes=10)
+        while waiting and now() < deadline:
+            await asyncio.sleep(15)
+            for uid, member in list(waiting.items()):
+                if await member_has_returned(member, old_session, channel):
+                    try:
+                        await member.send(
+                            "✅ **Tu es à jour !**\\n"
+                            "Tous les liens de la session ont bien été rendus.\\n"
+                            "**Aucun avertissement.** 🌸"
+                        )
+                    except Exception:
+                        pass
+                    waiting.pop(uid, None)
+
+        for uid, member in list(waiting.items()):
             if await member_has_returned(member, old_session, channel):
+                try:
+                    await member.send(
+                        "✅ **Tu es à jour !**\\n"
+                        "Tous les liens de la session ont bien été rendus.\\n"
+                        "**Aucun avertissement.** 🌸"
+                    )
+                except Exception:
+                    pass
                 continue
 
-            # Les admins reçoivent le rappel mais jamais d'avertissement.
             if member.guild_permissions.administrator:
                 continue
 
@@ -679,6 +699,33 @@ async def participation(msg):
                 msg.channel,
                 f"💗 {msg.author.mention} *+1 PP* — tu es maintenant à *{current}/6 PP* cette semaine."
             )
+
+            if len(session["participants"]) >= 10:
+                to_reward = [
+                    participant_id
+                    for participant_id in session["participants"]
+                    if participant_id not in session["mega_10_rewarded"]
+                ]
+                if to_reward:
+                    async with data_lock:
+                        for participant_id in to_reward:
+                            md(participant_id)["bows"] += 1
+                            session["mega_10_rewarded"].add(participant_id)
+                        save()
+
+                    first_unlock = not session["mega_10_unlocked"]
+                    session["mega_10_unlocked"] = True
+                    if first_unlock:
+                        await msg.channel.send(
+                            "🎉 **10 participantes au Méga Boost !**\\n"
+                            "Toutes les participantes de ce Méga gagnent **+1 🎀 lien sans rendre** !"
+                        )
+                    elif uid in to_reward:
+                        await temp_message(
+                            msg.channel,
+                            f"🎀 {msg.author.mention} le Méga a déjà atteint 10 participantes : "
+                            "tu gagnes **+1 🎀 lien sans rendre**."
+                        )
         return
 
     async with data_lock:
