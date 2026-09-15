@@ -683,6 +683,7 @@ def has_bonus_marker(content, marker):
 
 
 async def update_participant_counter(channel):
+    """Modifie uniquement le compteur affiché sous la session."""
     if not session:
         return
     message_id = session.get("participant_count_message_id")
@@ -697,13 +698,9 @@ async def update_participant_counter(channel):
         pass
 
 
-async def refuse_second_bonus(member):
+async def dm_bonus_refuse(member, texte):
     try:
-        await member.send(
-            "⚠️ **Bonus refusé**\n"
-            "Tu as déjà utilisé un bonus pendant cette session. "
-            "Lady autorise **1 seul bonus maximum par personne et par session**. 🌸"
-        )
+        await member.send(f"⚠️ **Bonus refusé**\\n{texte}")
     except Exception:
         pass
 
@@ -765,11 +762,17 @@ async def participation(msg):
         return
 
     if len(bonus_markers) > 1:
-        await refuse_second_bonus(msg.author)
+        await dm_bonus_refuse(
+            msg.author,
+            "Tu ne peux utiliser qu'**un seul bonus par session**. Choisis 🎁, 🎀, 👑, 💎 ou 🎂."
+        )
         return
 
     if bonus_markers and uid in session["bonus_used"]:
-        await refuse_second_bonus(msg.author)
+        await dm_bonus_refuse(
+            msg.author,
+            "Tu as déjà utilisé ton bonus pour cette session. **1 seul bonus maximum par personne et par session.** 🌸"
+        )
         return
 
     async with data_lock:
@@ -1726,14 +1729,10 @@ async def on_message(msg):
         and VINTED.search(msg.content or "")
     ):
         if any(has_bonus_marker(msg.content or "", x) for x in ("🎁", "🎀", "👑", "💎", "🎂")):
-            try:
-                await msg.author.send(
-                    "⚠️ **Bonus refusé**\n"
-                    "Aucun bonus n'est autorisé dans le salon sans session / 3 liens au-dessus. "
-                    "Poste uniquement ton lien normal. 🌸"
-                )
-            except Exception:
-                pass
+            await dm_bonus_refuse(
+                msg.author,
+                "Aucun bonus n'est autorisé dans le salon sans session / 3 liens au-dessus. Poste uniquement ton lien normal. 🌸"
+            )
             try:
                 await msg.delete()
             except (discord.Forbidden, discord.HTTPException):
