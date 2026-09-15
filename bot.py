@@ -21,6 +21,7 @@ SALON_VENTES_ID = 1528658847806390382
 SALON_JEU_ID = 1541713193762820106
 SALON_DISCUSSION_ID = 1528130797029167134
 SALON_ANNIVERSAIRES_ID = 1541680943583068200
+SALON_GROUPE_SESSION_ID = 1549453941367111690
 
 ROLE_ROSE = "🌸 SEMAINE À FAIRE"
 ROLE_VERT = "✅ À JOUR"
@@ -67,6 +68,7 @@ def fresh_data():
         "sales_daily": {},
         "sales_monthly": {},
         "monthly_sales_announced": [],
+        "group_session_chain": [],
     }
 
 
@@ -91,6 +93,7 @@ def load_data():
         raw.setdefault("sales_daily", {})
         raw.setdefault("sales_monthly", {})
         raw.setdefault("monthly_sales_announced", [])
+        raw.setdefault("group_session_chain", [])
         return raw
 
     except Exception as exc:
@@ -99,6 +102,7 @@ def load_data():
 
 
 DATA = load_data()
+DATA.setdefault("group_session_chain", [])
 DATA.setdefault("birthdays", {})
 
 
@@ -794,6 +798,158 @@ async def participation(msg):
             msg.channel,
             f"💗 {msg.author.mention} *+1 PP* — tu es maintenant à *{current}/6 PP* cette semaine."
         )
+
+# ============================================================
+# SALON SANS SESSION — CHAÎNE DES 3 LIENS
+# ============================================================
+
+def group_chain_entries():
+    chain = DATA.setdefault("group_session_chain", [])
+    if not isinstance(chain, list):
+        chain = []
+        DATA["group_session_chain"] = chain
+    return chain
+
+
+async def validate_group_session_entry(entry, channel):
+    if entry.get("validated"):
+        return False
+
+    member = channel.guild.get_member(int(entry["user_id"])) if channel.guild else None
+    if member is None:
+        return False
+
+    required_ids = [int(x) for x in entry.get("required_message_ids", [])]
+    for message_id in required_ids:
+        try:
+            previous = await channel.fetch_message(message_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            continue
+
+        reacted = False
+        for reaction in previous.reactions:
+            try:
+                async for user in reaction.users():
+                    if user.id == member.id:
+                        reacted = True
+                        break
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+            if reacted:
+                break
+        if not reacted:
+            return False
+
+    async with data_lock:
+        persistent = next(
+            (e for e in group_chain_entries()
+             if str(e.get("message_id")) == str(entry.get("message_id"))),
+            None,
+        )
+        if not persistent or persistent.get("validated"):
+            return False
+        persistent["validated"] = True
+        save()
+
+    current = await award_pp(member)
+    await temp_message(
+        channel,
+        f"💗 {member.mention} **participation validée ! +1 PP** — "
+        f"tu es maintenant à **{current}/6 PP** cette semaine."
+    )
+    return True
+
+
+async def group_session_post(msg):
+    uid = msg.author.id
+    content = msg.content or ""
+
+    # Aucun bonus Lady dans ce salon.
+    if any(has_bonus_marker(content, x) for x in ("🎁", "🎀", "👑", "💎", "🎂")):
+        try:
+            await msg.author.send(
+                "❌ Aucun bonus Lady (🎁 🎀 👑 💎 🎂) n'est utilisable dans le salon sans session. "
+                "Poste uniquement ton lien Vinted normal."
+            )
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+        try:
+            await msg.delete()
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+        return
+
+    async with data_lock:
+        chain = group_chain_entries()
+        last_three = chain[-3:]
+        allowed = not any(int(e.get("user_id", 0)) == uid for e in last_three)
+
+        if allowed:
+            required_ids = [str(e["message_id"]) for e in last_three]
+            entry = {
+                "message_id": str(msg.id),
+                "user_id": str(uid),
+                "required_message_ids": required_ids,
+                "validated": False,
+                "created_at": now().isoformat(),
+            }
+            chain.append(entry)
+            DATA["group_session_chain"] = chain[-1000:]
+            save()
+        else:
+            required_ids = []
+            entry = None
+
+    if not allowed:
+        try:
+            await msg.delete()
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+        await temp_message(
+            msg.channel,
+            f"⏳ {msg.author.mention} tu dois attendre que **3 autres personnes** "
+            "aient posté après ton dernier lien avant de pouvoir reposter."
+        )
+        return
+
+    if not required_ids:
+        # Première personne de la chaîne : rien à rendre au-dessus, donc +1 PP directement.
+        await validate_group_session_entry(entry, msg.channel)
+    else:
+        await temp_message(
+            msg.channel,
+            f"🔗 {msg.author.mention} ton passage est enregistré. "
+            f"Fais les **{len(required_ids)} lien(s) juste au-dessus** : "
+            "Lady validera automatiquement ton **+1 PP** dès que tu seras à jour."
+        )
+
+
+async def check_group_session_pending_for(user_id, channel):
+    async with data_lock:
+        pending = [
+            dict(e) for e in group_chain_entries()
+            if int(e.get("user_id", 0)) == int(user_id) and not e.get("validated")
+        ]
+    for entry in pending:
+        await validate_group_session_entry(entry, channel)
+
+
+@bot.event
+async def on_raw_reaction_add(payload):
+    if bot.user and payload.user_id == bot.user.id:
+        return
+    if payload.channel_id != SALON_GROUPE_SESSION_ID:
+        return
+
+    channel = bot.get_channel(payload.channel_id)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(payload.channel_id)
+        except Exception:
+            return
+
+    await check_group_session_pending_for(payload.user_id, channel)
+
 
 # ============================================================
 # VENTES
@@ -1568,6 +1724,17 @@ async def on_message(msg):
 
     if msg.channel.id == SALON_VENTES_ID and msg.attachments:
         await sale(msg)
+
+    if (
+        msg.channel.id == SALON_GROUPE_SESSION_ID
+        and VINTED.search(msg.content or "")
+    ):
+        await group_session_post(msg)
+        try:
+            await msg.edit(suppress=True)
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+        return
 
     if (
         msg.channel.id == SALON_SESSIONS_ID
