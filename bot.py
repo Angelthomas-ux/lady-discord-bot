@@ -1361,6 +1361,44 @@ def admin(ctx):
     return bool(ctx.guild and ctx.author.guild_permissions.administrator)
 
 
+@bot.command(name="pp_ajouter")
+async def pp_ajouter(ctx, member: discord.Member, nombre: int = 1):
+    if not admin(ctx):
+        return
+    if nombre < 1:
+        await ctx.send("❌ Le nombre de PP doit être au moins 1.")
+        return
+
+    current = None
+    for _ in range(nombre):
+        current = await award_pp(member)
+
+    await ctx.send(
+        f"💗 {member.mention} : **+{nombre} PP** ajouté{'s' if nombre > 1 else ''} manuellement. "
+        f"Total cette semaine : **{current} PP**."
+    )
+
+
+@bot.command(name="lien_ajouter")
+async def lien_ajouter(ctx, member: discord.Member, nombre: int = 1):
+    if not admin(ctx):
+        return
+    if nombre < 1:
+        await ctx.send("❌ Le nombre de liens sans rendre doit être au moins 1.")
+        return
+
+    async with data_lock:
+        m = md(member.id)
+        m["bows"] += nombre
+        bows = m["bows"]
+        save()
+
+    await ctx.send(
+        f"🎀 {member.mention} : **+{nombre} lien{'s' if nombre > 1 else ''} sans rendre**. "
+        f"Total : **{bows} 🎀**."
+    )
+
+
 @bot.command()
 async def troc(ctx, member: discord.Member):
     if not admin(ctx):
