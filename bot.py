@@ -22,6 +22,8 @@ SALON_JEU_ID = 1541713193762820106
 SALON_DISCUSSION_ID = 1528130797029167134
 SALON_ANNIVERSAIRES_ID = 1541680943583068200
 SALON_GROUPE_SESSION_ID = 1549453941367111690
+SALON_TROC_ID = 1549331152601489448
+SALON_ADMIN_ID = 1541683049320681523
 
 ROLE_ROSE = "🌸 SEMAINE À FAIRE"
 ROLE_VERT = "✅ À JOUR"
@@ -182,8 +184,6 @@ FIXED = [
     ("🚀 Méga Boost", time(14, 0), time(14, 30), "mega"),
     ("🍹 Apéro", time(18, 30), time(19, 0), "normal"),
     ("🍽️ Repas", time(19, 0), time(19, 30), "normal"),
-    ("✖️ Multiplicateur x2", time(20, 40), time(20, 50), "normal"),
-    ("💔 Retrait de favoris", time(20, 50), time(21, 0), "normal"),
     ("🚀 Méga Boost", time(21, 0), time(21, 30), "mega"),
 ]
 
@@ -201,6 +201,8 @@ FREE_SESSIONS = [
     "👗 Femme",
     "👔 Homme",
     "⚠️ Retrait d'un avertissement",
+    "💔 Retrait de favoris",
+    "✖️ Multiplicateur x2",
 ]
 
 SESSION_IMAGES = {
@@ -434,12 +436,20 @@ async def return_check_after_10_minutes(old_session, channel):
             waiting[uid] = member
             jump_links = "\\n".join(f"🔗 {message.jump_url}" for message in missing)
             try:
-                await member.send(
-                    f"⚠️ **{old_session['name']} terminée**\\n\\n"
-                    f"Tu n'es pas encore à jour ! Il te manque **{len(missing)} lien(s)**.\\n"
-                    "Tu as **10 minutes** pour te mettre à jour, sinon tu recevras un avertissement.\\n\\n"
-                    f"**Liste des liens manquants :**\\n{jump_links}"
-                )
+                if is_lady_admin(member):
+                    await member.send(
+                        f"⚠️ **{old_session['name']} terminée**\\n\\n"
+                        f"Tu n'es pas encore à jour ! Il te manque **{len(missing)} lien(s)**.\\n"
+                        "Tu as **10 minutes** pour terminer tes retours. **Aucun avertissement ne sera ajouté.**\\n\\n"
+                        f"**Liste des liens manquants :**\\n{jump_links}"
+                    )
+                else:
+                    await member.send(
+                        f"⚠️ **{old_session['name']} terminée**\\n\\n"
+                        f"Tu n'es pas encore à jour ! Il te manque **{len(missing)} lien(s)**.\\n"
+                        "Tu as **10 minutes** pour te mettre à jour, sinon tu recevras un avertissement.\\n\\n"
+                        f"**Liste des liens manquants :**\\n{jump_links}"
+                    )
             except Exception:
                 pass
 
@@ -473,7 +483,7 @@ async def return_check_after_10_minutes(old_session, channel):
                     pass
                 continue
 
-            if member.guild_permissions.administrator:
+            if is_lady_admin(member):
                 continue
 
             async with data_lock:
@@ -504,6 +514,17 @@ async def return_check_after_10_minutes(old_session, channel):
                     print(f"Impossible de timeout {member}: {exc}")
     finally:
         pending_return_checks.discard(key)
+
+
+def is_lady_admin(member):
+    """Admin Lady = permission Administrateur OU accès au salon privé admin."""
+    if getattr(member.guild_permissions, "administrator", False):
+        return True
+    try:
+        admin_channel = member.guild.get_channel(SALON_ADMIN_ID)
+        return bool(admin_channel and admin_channel.permissions_for(member).view_channel)
+    except Exception:
+        return False
 
 
 async def finish_session():
@@ -601,8 +622,18 @@ async def launch_free(n=None):
         return
 
     choices = [x for x in FREE_SESSIONS if x != last_free_session]
+
+    # Retrait de favoris : maximum 3 lancements par jour.
+    today_prefix = n.date().isoformat()
+    retrait_count = 0
+    for claim in DATA.get("session_claims", []):
+        if "💔 Retrait de favoris" in str(claim) and today_prefix in str(claim):
+            retrait_count += 1
+    if retrait_count >= 3:
+        choices = [x for x in choices if x != "💔 Retrait de favoris"]
+
     if not choices:
-        choices = FREE_SESSIONS[:]
+        choices = [x for x in FREE_SESSIONS if x != "💔 Retrait de favoris" or retrait_count < 3]
 
     name = random.choice(choices)
     end = min(n + timedelta(minutes=10), next_fixed_start(n))
@@ -1372,48 +1403,194 @@ async def on_member_join(member):
 
 QUIZ_TIMES = [time(9, 45), time(11, 0), time(15, 0), time(18, 0), time(20, 0), time(22, 0)]
 
-QUIZ_QUESTIONS = [
-    ("Quelle est la capitale de la France ?", ["paris"]),
-    ("Combien y a-t-il de jours dans une semaine ?", ["7", "sept"]),
-    ("Quelle planète est surnommée la planète rouge ?", ["mars"]),
-    ("Quel animal miaule ?", ["chat", "le chat"]),
-    ("Combien font 5 + 7 ?", ["12", "douze"]),
-    ("Quelle couleur obtient-on en mélangeant bleu et jaune ?", ["vert", "verte"]),
-    ("Quel est le plus grand océan du monde ?", ["pacifique", "océan pacifique", "ocean pacifique"]),
-    ("Combien de mois compte une année ?", ["12", "douze"]),
-    ("Quel fruit jaune est souvent associé aux singes ?", ["banane", "la banane"]),
-    ("Quel est le contraire de chaud ?", ["froid"]),
-    ("Combien de côtés a un triangle ?", ["3", "trois"]),
-    ("Quel gaz respirons-nous principalement pour vivre ?", ["oxygène", "oxygene"]),
-    ("Quelle saison vient après l'été ?", ["automne", "l'automne"]),
-    ("Quel animal est surnommé le roi de la jungle ?", ["lion", "le lion"]),
-    ("Combien font 9 x 3 ?", ["27", "vingt-sept", "vingt sept"]),
-    ("Dans quel pays se trouve Rome ?", ["italie", "l'italie"]),
-    ("Quel est le satellite naturel de la Terre ?", ["lune", "la lune"]),
-    ("Combien de minutes y a-t-il dans une heure ?", ["60", "soixante"]),
-    ("Quelle couleur a une émeraude ?", ["vert", "verte"]),
-    ("Quel animal produit de la laine ?", ["mouton", "le mouton"]),
-    ("Quelle est la capitale de l'Espagne ?", ["madrid"]),
-    ("Combien font 100 divisé par 4 ?", ["25", "vingt-cinq", "vingt cinq"]),
-    ("Quel est le premier mois de l'année ?", ["janvier"]),
-    ("Quel instrument possède généralement 88 touches ?", ["piano", "le piano"]),
-    ("Quelle est la capitale de l'Italie ?", ["rome"]),
-    ("Quel animal aboie ?", ["chien", "le chien"]),
-    ("Combien de pattes a une araignée ?", ["8", "huit"]),
-    ("Quel métal précieux est symbolisé par Au ?", ["or", "l'or"]),
-    ("Quelle fête a lieu le 25 décembre ?", ["noël", "noel"]),
-    ("Combien font 15 - 6 ?", ["9", "neuf"]),
-    ("Quel est le plus grand mammifère du monde ?", ["baleine bleue", "la baleine bleue"]),
-    ("Quelle est la capitale du Royaume-Uni ?", ["londres"]),
-    ("Combien de couleurs compte traditionnellement un arc-en-ciel ?", ["7", "sept"]),
-    ("Quel organe pompe le sang dans le corps ?", ["coeur", "cœur", "le coeur", "le cœur"]),
-    ("Quel jour vient après vendredi ?", ["samedi"]),
-    ("Quel est le contraire de rapide ?", ["lent", "lente"]),
-    ("Combien font 8 x 8 ?", ["64", "soixante-quatre", "soixante quatre"]),
-    ("Dans quel pays se trouve la tour de Pise ?", ["italie", "l'italie"]),
-    ("Quel animal pond des œufs et donne de la laine ?", ["aucun", "aucun animal"]),
-    ("Quelle est la capitale de la Belgique ?", ["bruxelles"]),
-]
+QUIZ_THEMES = {
+    "🎵 Musique": [
+        ("Quel groupe chantait Bohemian Rhapsody ?", ["queen"]),
+        ("Quel chanteur est surnommé le King of Pop ?", ["michael jackson"]),
+        ("Quel groupe français a chanté L'Aventurier ?", ["indochine"]),
+        ("Quelle chanteuse interprète Rolling in the Deep ?", ["adele", "adèle"]),
+        ("Quel duo français est connu pour les casques de robots ?", ["daft punk"]),
+        ("Quel chanteur belge interprète Alors on danse ?", ["stromae"]),
+        ("Quel groupe a pour chanteur Bono ?", ["u2"]),
+        ("Quelle chanteuse a sorti l'album 21 ?", ["adele", "adèle"]),
+        ("Quel chanteur français interprétait Allumer le feu ?", ["johnny hallyday", "johnny"]),
+        ("Quelle chanteuse canadienne interprète Pour que tu m'aimes encore ?", ["céline dion", "celine dion"]),
+        ("Quel groupe britannique a chanté Yellow ?", ["coldplay"]),
+        ("Quel artiste interprète Formidable ?", ["stromae"]),
+        ("Quel chanteur français est connu pour La Bohème ?", ["charles aznavour", "aznavour"]),
+        ("Quel groupe a chanté I Want to Break Free ?", ["queen"]),
+        ("Quelle chanteuse est surnommée la Material Girl ?", ["madonna"]),
+        ("Quel instrument possède généralement 88 touches ?", ["piano", "le piano"]),
+        ("Combien de cordes possède une guitare classique standard ?", ["6", "six"]),
+        ("Quel instrument joue principalement un batteur ?", ["batterie", "la batterie"]),
+        ("Comment appelle-t-on une chanson chantée par deux personnes ?", ["duo", "un duo"]),
+        ("Quel groupe suédois a chanté Dancing Queen ?", ["abba"]),
+        ("Quelle chanteuse interprète Bad Romance ?", ["lady gaga"]),
+        ("Quel chanteur interprète Shape of You ?", ["ed sheeran"]),
+        ("Quel groupe a chanté Smells Like Teen Spirit ?", ["nirvana"]),
+        ("Quelle chanteuse interprète I Will Always Love You dans Bodyguard ?", ["whitney houston"]),
+        ("Quel chanteur français interprète Je te donne avec Michael Jones ?", ["jean-jacques goldman", "jean jacques goldman", "goldman"]),
+        ("Quel groupe britannique avait Freddie Mercury comme chanteur ?", ["queen"]),
+        ("Quel artiste français interprète Papaoutai ?", ["stromae"]),
+        ("Quelle chanteuse interprète Like a Prayer ?", ["madonna"]),
+        ("Quel chanteur interprète Thriller ?", ["michael jackson"]),
+        ("Quel groupe irlandais interprète With or Without You ?", ["u2"]),
+        ("Quel chanteur français interprète Les Lacs du Connemara ?", ["michel sardou", "sardou"]),
+        ("Quelle chanteuse interprète Someone Like You ?", ["adele", "adèle"]),
+        ("Quel artiste interprète Perfect ?", ["ed sheeran"]),
+        ("Quel groupe français interprète J'ai demandé à la lune ?", ["indochine"]),
+        ("Quelle chanteuse interprète Poker Face ?", ["lady gaga"]),
+    ],
+    "🎬 Films & cinéma": [
+        ("Dans quel film trouve-t-on le personnage de Jack Sparrow ?", ["pirates des caraïbes", "pirates des caraibes"]),
+        ("Comment s'appelle le sorcier à lunettes créé par J. K. Rowling ?", ["harry potter"]),
+        ("Quel film met en scène un paquebot nommé Titanic ?", ["titanic"]),
+        ("Dans Retour vers le futur, comment s'appelle le jeune héros ?", ["marty mcfly", "marty"]),
+        ("Quel acteur incarne principalement Indiana Jones au cinéma ?", ["harrison ford"]),
+        ("Dans quel film d'animation trouve-t-on Simba ?", ["le roi lion", "roi lion"]),
+        ("Comment s'appelle l'ogre vert de DreamWorks ?", ["shrek"]),
+        ("Dans quel film trouve-t-on le personnage de Rocky Balboa ?", ["rocky"]),
+        ("Quel film met en scène un parc rempli de dinosaures clonés ?", ["jurassic park"]),
+        ("Comment s'appelle le robot compacteur de Pixar ?", ["wall-e", "wall e", "walle"]),
+        ("Quel film Disney met en scène une reine aux pouvoirs de glace ?", ["la reine des neiges", "reine des neiges", "frozen"]),
+        ("Dans quel film trouve-t-on le personnage d'E.T. ?", ["e.t.", "et", "e.t"]),
+        ("Quel super-héros est Bruce Wayne ?", ["batman"]),
+        ("Quel super-héros est Peter Parker ?", ["spider-man", "spiderman", "spider man"]),
+        ("Dans quel film trouve-t-on Neo et Morpheus ?", ["matrix", "the matrix"]),
+        ("Comment s'appelle le cowboy de Toy Story ?", ["woody"]),
+        ("Comment s'appelle l'astronaute-jouet de Toy Story ?", ["buzz l'éclair", "buzz l eclair", "buzz lightyear", "buzz"]),
+        ("Quel film met en scène le poisson-clown Nemo ?", ["le monde de nemo", "le monde de némo", "finding nemo"]),
+        ("Dans quel film Disney trouve-t-on Aladdin et Jasmine ?", ["aladdin"]),
+        ("Quel film raconte l'histoire d'un boxeur joué par Sylvester Stallone ?", ["rocky"]),
+        ("Quel acteur joue le capitaine Jack Sparrow ?", ["johnny depp"]),
+        ("Quel film de science-fiction met en scène les Na'vi ?", ["avatar"]),
+        ("Dans quel film d'animation trouve-t-on les émotions Joie et Tristesse ?", ["vice-versa", "vice versa", "inside out"]),
+        ("Quel film Disney met en scène Vaiana ?", ["vaiana", "moana"]),
+        ("Quel personnage dit souvent Vers l'infini et au-delà dans Toy Story ?", ["buzz l'éclair", "buzz l eclair", "buzz"]),
+        ("Dans quel film trouve-t-on le personnage de Forrest Gump ?", ["forrest gump"]),
+        ("Quel film met en scène un requin terrorisant une station balnéaire ?", ["les dents de la mer", "jaws"]),
+        ("Quel héros porte un bouclier aux couleurs américaines ?", ["captain america"]),
+        ("Quel film d'animation met en scène Rémy, un rat qui cuisine ?", ["ratatouille"]),
+        ("Quel film Disney met en scène Belle et une Bête ?", ["la belle et la bête", "la belle et la bete"]),
+        ("Quel film met en scène un extraterrestre bleu nommé Stitch ?", ["lilo et stitch", "lilo & stitch"]),
+        ("Dans quel film trouve-t-on le personnage de Rambo ?", ["rambo"]),
+        ("Quel acteur joue Iron Man dans l'univers Marvel ?", ["robert downey jr", "robert downey junior"]),
+        ("Dans quel film d'animation trouve-t-on Miguel et le monde des morts ?", ["coco"]),
+        ("Quel film met en scène les sœurs Anna et Elsa ?", ["la reine des neiges", "reine des neiges", "frozen"]),
+    ],
+    "📺 Séries & télévision": [
+        ("Dans Friends, comment s'appelle le frère de Monica ?", ["ross", "ross geller"]),
+        ("Dans Stranger Things, quel est le prénom de la jeune fille aux pouvoirs ?", ["onze", "eleven", "11"]),
+        ("Quelle série suit la famille Shelby ?", ["peaky blinders"]),
+        ("Dans La Casa de Papel, quel surnom porte le cerveau du braquage ?", ["le professeur", "professeur", "el profesor"]),
+        ("Quelle série met en scène Walter White ?", ["breaking bad"]),
+        ("Dans Friends, quel métier exerce Ross ?", ["paléontologue", "paleontologue"]),
+        ("Quelle série met en scène les personnages Meredith Grey et Derek Shepherd ?", ["grey's anatomy", "greys anatomy", "grey anatomy"]),
+        ("Dans The Walking Dead, quel est le prénom du shérif au début de la série ?", ["rick", "rick grimes"]),
+        ("Quelle série met en scène Wednesday Addams ?", ["wednesday", "mercredi"]),
+        ("Dans Game of Thrones, quelle famille a pour devise L'hiver vient ?", ["stark", "les stark"]),
+        ("Quelle série française suit une agence artistique appelée ASK ?", ["dix pour cent", "10 pour cent"]),
+        ("Dans Stranger Things, dans quelle ville vivent les héros ?", ["hawkins"]),
+        ("Quelle série met en scène Lucifer Morningstar à Los Angeles ?", ["lucifer"]),
+        ("Dans Friends, comment s'appelle le café où le groupe se retrouve ?", ["central perk"]),
+        ("Quelle série met en scène un médecin nommé Gregory House ?", ["dr house", "docteur house", "house"]),
+        ("Dans Buffy contre les vampires, comment s'appelle l'héroïne ?", ["buffy", "buffy summers"]),
+        ("Quelle série met en scène les frères Sam et Dean Winchester ?", ["supernatural"]),
+        ("Dans Charmed, quel est le nom de famille des trois sœurs principales ?", ["halliwell"]),
+        ("Quelle série met en scène Dexter Morgan ?", ["dexter"]),
+        ("Dans Les Simpson, comment s'appelle le père de famille ?", ["homer", "homer simpson"]),
+        ("Quelle série met en scène le personnage de Sheldon Cooper ?", ["the big bang theory", "big bang theory"]),
+        ("Dans Plus belle la vie, dans quelle ville se situe principalement l'action ?", ["marseille"]),
+        ("Quelle série met en scène le personnage de Thomas Shelby ?", ["peaky blinders"]),
+        ("Dans Prison Break, comment s'appelle le frère de Lincoln ?", ["michael", "michael scofield"]),
+        ("Quelle série suit un groupe de survivants après une apocalypse zombie ?", ["the walking dead", "walking dead"]),
+        ("Dans Malcolm, comment s'appelle la mère de famille ?", ["lois"]),
+        ("Quelle série met en scène Carrie Bradshaw ?", ["sex and the city"]),
+        ("Dans Vikings, quel personnage est joué par Travis Fimmel ?", ["ragnar", "ragnar lothbrok"]),
+        ("Quelle série met en scène un tueur en série surnommé Trinity dans une saison ?", ["dexter"]),
+        ("Dans Un gars, une fille, quels sont les prénoms du couple ?", ["alex et jean", "jean et alex", "alexandra et jean"]),
+        ("Quelle série met en scène les personnages Elena, Stefan et Damon ?", ["vampire diaries", "the vampire diaries"]),
+        ("Dans Desperate Housewives, comment s'appelle la rue principale ?", ["wisteria lane"]),
+        ("Quelle série met en scène un professeur de chimie qui devient fabricant de drogue ?", ["breaking bad"]),
+        ("Dans Kaamelott, quel roi est au centre de l'histoire ?", ["arthur", "roi arthur"]),
+        ("Quelle série met en scène le personnage de Joe Goldberg ?", ["you"]),
+    ],
+    "🧠 Culture générale": [
+        ("Quelle est la capitale de la France ?", ["paris"]),
+        ("Quelle planète est surnommée la planète rouge ?", ["mars"]),
+        ("Quel est le plus grand océan du monde ?", ["pacifique", "océan pacifique", "ocean pacifique"]),
+        ("Combien de mois compte une année ?", ["12", "douze"]),
+        ("Combien de côtés a un triangle ?", ["3", "trois"]),
+        ("Dans quel pays se trouve Rome ?", ["italie", "l'italie"]),
+        ("Quel est le satellite naturel de la Terre ?", ["lune", "la lune"]),
+        ("Combien de minutes y a-t-il dans une heure ?", ["60", "soixante"]),
+        ("Quelle est la capitale de l'Espagne ?", ["madrid"]),
+        ("Quel métal précieux est symbolisé par Au ?", ["or", "l'or"]),
+        ("Quelle fête a lieu le 25 décembre ?", ["noël", "noel"]),
+        ("Quel est le plus grand mammifère du monde ?", ["baleine bleue", "la baleine bleue"]),
+        ("Quelle est la capitale du Royaume-Uni ?", ["londres"]),
+        ("Quel organe pompe le sang dans le corps ?", ["coeur", "cœur", "le coeur", "le cœur"]),
+        ("Quelle est la capitale de la Belgique ?", ["bruxelles"]),
+        ("Combien de continents compte-t-on généralement ?", ["7", "sept"]),
+        ("Quelle est la capitale du Portugal ?", ["lisbonne"]),
+        ("Quel est le plus grand désert chaud du monde ?", ["sahara", "le sahara"]),
+        ("Quel pays a la forme d'une botte sur une carte ?", ["italie", "l'italie"]),
+        ("Combien font 8 x 8 ?", ["64", "soixante-quatre", "soixante quatre"]),
+        ("Quelle langue parle-t-on principalement au Brésil ?", ["portugais", "le portugais"]),
+        ("Quel est le premier mois de l'année ?", ["janvier"]),
+        ("Quelle planète est la plus proche du Soleil ?", ["mercure"]),
+        ("Quel animal est le plus grand animal terrestre actuel ?", ["éléphant", "elephant", "éléphant d'afrique", "elephant d'afrique"]),
+        ("Quelle est la capitale de l'Allemagne ?", ["berlin"]),
+        ("Combien de secondes y a-t-il dans une minute ?", ["60", "soixante"]),
+        ("Quel élément chimique a pour symbole O ?", ["oxygène", "oxygene"]),
+        ("Quelle est la capitale des Pays-Bas ?", ["amsterdam"]),
+        ("Combien font 100 divisé par 4 ?", ["25", "vingt-cinq", "vingt cinq"]),
+        ("Quelle saison vient après l'été ?", ["automne", "l'automne"]),
+        ("Quel animal produit naturellement de la laine utilisée pour les vêtements ?", ["mouton", "le mouton"]),
+        ("Combien de pattes a une araignée ?", ["8", "huit"]),
+        ("Quelle couleur obtient-on en mélangeant bleu et jaune ?", ["vert", "verte"]),
+        ("Quelle est la capitale de la Grèce ?", ["athènes", "athenes"]),
+        ("Quel gaz est indispensable à notre respiration ?", ["oxygène", "oxygene"]),
+    ],
+    "🧸 Disney & dessins animés": [
+        ("Comment s'appelle le père de Simba dans Le Roi Lion ?", ["mufasa"]),
+        ("Quel personnage Disney perd une chaussure de verre ?", ["cendrillon"]),
+        ("Comment s'appelle la sœur d'Elsa dans La Reine des neiges ?", ["anna"]),
+        ("Quel poisson est le père de Nemo ?", ["marin", "marlin"]),
+        ("Comment s'appelle le dragon de Mulan ?", ["mushu"]),
+        ("Quel personnage Disney a un nez qui s'allonge lorsqu'il ment ?", ["pinocchio"]),
+        ("Comment s'appelle le compagnon crabe d'Ariel ?", ["sébastien", "sebastien"]),
+        ("Dans Aladdin, comment s'appelle la princesse ?", ["jasmine"]),
+        ("Quel animal est Dumbo ?", ["éléphant", "elephant", "un éléphant", "un elephant"]),
+        ("Comment s'appelle le méchant lion dans Le Roi Lion ?", ["scar"]),
+        ("Dans La Belle et la Bête, comment s'appelle l'héroïne ?", ["belle"]),
+        ("Quel personnage vit dans un ananas sous la mer ?", ["bob l'éponge", "bob l eponge", "spongebob"]),
+        ("Comment s'appelle le meilleur ami de Mickey ?", ["dingo", "goofy"]),
+        ("Quel canard Disney porte une marinière bleue ?", ["donald", "donald duck"]),
+        ("Dans Ratatouille, comment s'appelle le rat cuisinier ?", ["rémy", "remy"]),
+        ("Comment s'appelle la petite fille dans Monstres & Cie ?", ["bouh", "boo"]),
+        ("Dans Toy Story, quel jouet est un cow-boy ?", ["woody"]),
+        ("Quel personnage de Disney est une fée minuscule amie de Peter Pan ?", ["clochette", "fée clochette", "fee clochette"]),
+        ("Comment s'appelle l'héroïne de La Petite Sirène ?", ["ariel"]),
+        ("Dans Vaiana, comment s'appelle le demi-dieu ?", ["maui"]),
+        ("Quel ours adore le miel ?", ["winnie", "winnie l'ourson", "winnie l ourson"]),
+        ("Comment s'appelle le caméléon de Raiponce ?", ["pascal"]),
+        ("Quel personnage est le fils de Mufasa ?", ["simba"]),
+        ("Dans Les Aristochats, comment s'appelle la maman chatte ?", ["duchesse"]),
+        ("Comment s'appelle le chien de Mickey ?", ["pluto"]),
+        ("Dans 101 Dalmatiens, comment s'appelle la méchante ?", ["cruella", "cruella d'enfer", "cruella d enfer"]),
+        ("Quel personnage Disney est élevé par des gorilles ?", ["tarzan"]),
+        ("Comment s'appelle la princesse de La Princesse et la Grenouille ?", ["tiana"]),
+        ("Dans Lilo & Stitch, quel numéro d'expérience est Stitch ?", ["626", "six cent vingt-six", "six cent vingt six"]),
+        ("Quel personnage Disney possède une lampe magique ?", ["aladdin"]),
+        ("Comment s'appelle le cheval de Raiponce ?", ["maximus"]),
+        ("Dans Encanto, comment s'appelle l'héroïne sans pouvoir magique au début ?", ["mirabel"]),
+        ("Quel personnage est l'ami tigre de Winnie ?", ["tigrou", "tigger"]),
+        ("Comment s'appelle la princesse qui dort après s'être piquée à un fuseau ?", ["aurore", "la belle au bois dormant"]),
+        ("Dans Cars, quel est le numéro de Flash McQueen ?", ["95", "quatre-vingt-quinze", "quatre vingt quinze"]),
+    ],
+}
+
 
 
 def normalize_answer(text):
@@ -1421,8 +1598,8 @@ def normalize_answer(text):
 
 
 def quiz_overlaps_mega(start_dt):
-    # 20 questions x 30 s = jusqu'à 10 minutes.
-    end_dt = start_dt + timedelta(minutes=10)
+    # 30 questions x 30 s = jusqu'à 15 minutes.
+    end_dt = start_dt + timedelta(minutes=15)
     for name, start_t, end_t, kind in FIXED:
         if kind != "mega":
             continue
@@ -1442,11 +1619,18 @@ async def run_quiz(start_dt):
         return
 
     async with quiz_lock:
-        questions = random.sample(QUIZ_QUESTIONS, min(20, len(QUIZ_QUESTIONS)))
-        await channel.send("🎮 **Le jeu Lady commence !** 20 questions — 30 secondes par question. Première bonne réponse = 🎁")
+        theme, bank = random.choice(list(QUIZ_THEMES.items()))
+        questions = random.sample(bank, min(30, len(bank)))
+        scores = {}
+
+        await channel.send(
+            f"🎮 **Le jeu Lady commence !**\n"
+            f"Thème : **{theme}**\n"
+            "**30 questions** — 30 secondes par question. Première bonne réponse = 🎁"
+        )
 
         for index, (question, answers) in enumerate(questions, start=1):
-            await channel.send(f"❓ **Question {index}/20**\n{question}")
+            await channel.send(f"❓ **Question {index}/30** — {theme}\n{question}")
 
             normalized = {normalize_answer(a) for a in answers}
 
@@ -1463,6 +1647,8 @@ async def run_quiz(start_dt):
                 await channel.send("⏱️ Temps écoulé !")
                 continue
 
+            scores[winner_msg.author.id] = scores.get(winner_msg.author.id, 0) + 1
+
             async with data_lock:
                 m = md(winner_msg.author.id)
                 m["gifts"] += 1
@@ -1470,10 +1656,24 @@ async def run_quiz(start_dt):
                 save()
 
             await channel.send(
-                f"🎁 Bravo {winner_msg.author.mention} ! **+1 cadeau** — tu en as maintenant **{gifts}**."
+                f"🎁 Bravo {winner_msg.author.mention} ! **+1 cadeau** — "
+                f"bonne réponse n°**{scores[winner_msg.author.id]}** dans cette partie — "
+                f"tu as maintenant **{gifts} 🎁**."
             )
 
-        await channel.send("🏁 **Le jeu Lady est terminé !**")
+        if scores:
+            ranking = sorted(scores.items(), key=lambda item: (-item[1], item[0]))
+            medals = ["🥇", "🥈", "🥉"]
+            lines = []
+            for place, (uid, points) in enumerate(ranking, start=1):
+                prefix = medals[place - 1] if place <= 3 else f"**{place}.**"
+                lines.append(f"{prefix} <@{uid}> — **{points} bonne(s) réponse(s)**")
+            await channel.send(
+                "🏁 **Le jeu Lady est terminé !**\n\n"
+                f"🏆 **Classement — {theme}**\n" + "\n".join(lines)
+            )
+        else:
+            await channel.send("🏁 **Le jeu Lady est terminé !** Aucune bonne réponse cette fois-ci.")
 
 
 @tasks.loop(seconds=20)
@@ -1611,7 +1811,7 @@ async def send_stats(member):
 # ============================================================
 
 def admin(ctx):
-    return bool(ctx.guild and ctx.author.guild_permissions.administrator)
+    return bool(ctx.guild and is_lady_admin(ctx.author))
 
 
 @bot.command(name="pp_ajouter")
@@ -1654,7 +1854,10 @@ async def lien_ajouter(ctx, member: discord.Member, nombre: int = 1):
 
 @bot.command()
 async def troc(ctx, member: discord.Member, nombre: int):
-    if not admin(ctx):
+    # Commande disponible uniquement dans le salon Troc.
+    if not ctx.guild or ctx.channel.id != SALON_TROC_ID:
+        return
+    if not is_lady_admin(ctx.author):
         return
 
     if nombre <= 0 or nombre % 6 != 0:
