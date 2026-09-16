@@ -182,6 +182,7 @@ FIXED = [
     ("🚀 Méga Boost", time(14, 0), time(14, 30), "mega"),
     ("🍹 Apéro", time(18, 30), time(19, 0), "normal"),
     ("🍽️ Repas", time(19, 0), time(19, 30), "normal"),
+    ("✖️ Multiplicateur x2", time(20, 40), time(20, 50), "normal"),
     ("💔 Retrait de favoris", time(20, 50), time(21, 0), "normal"),
     ("🚀 Méga Boost", time(21, 0), time(21, 30), "mega"),
 ]
@@ -200,7 +201,6 @@ FREE_SESSIONS = [
     "👗 Femme",
     "👔 Homme",
     "⚠️ Retrait d'un avertissement",
-    "✖️ Multiplicateur x2",
 ]
 
 SESSION_IMAGES = {
@@ -223,7 +223,7 @@ SESSION_IMAGES = {
     "👔 Homme": ("IMG_9599.jpeg", "IMG_9600.jpeg"),
     "⚠️ Retrait d'un avertissement": ("IMG_9597.jpeg", "IMG_9598.jpeg"),
     "💔 Retrait de favoris": ("IMG_9595.jpeg", "IMG_9596.jpeg"),
-    "✖️ Multiplicateur x2": ("SESSION_MULTIPLICATEUR_X2.jpeg", "STOP_MULTIPLICATEUR_X2.png"),
+    "✖️ Multiplicateur x2": ("IMG_9654.jpeg", "B0B07086-0369-4BB5-9664-BBB886307BBF.png"),
 }
 
 session = None
