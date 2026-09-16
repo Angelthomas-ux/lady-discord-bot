@@ -200,6 +200,7 @@ FREE_SESSIONS = [
     "👗 Femme",
     "👔 Homme",
     "⚠️ Retrait d'un avertissement",
+    "✖️ Multiplicateur x2",
 ]
 
 SESSION_IMAGES = {
@@ -222,6 +223,7 @@ SESSION_IMAGES = {
     "👔 Homme": ("IMG_9599.jpeg", "IMG_9600.jpeg"),
     "⚠️ Retrait d'un avertissement": ("IMG_9597.jpeg", "IMG_9598.jpeg"),
     "💔 Retrait de favoris": ("IMG_9595.jpeg", "IMG_9596.jpeg"),
+    "✖️ Multiplicateur x2": ("SESSION_MULTIPLICATEUR_X2.jpeg", "STOP_MULTIPLICATEUR_X2.png"),
 }
 
 session = None
@@ -349,6 +351,14 @@ async def begin_session(name, start, end, kind, is_free=False):
             f"💔 **SESSION RETRAIT DE FAVORIS**\n"
             f"Posez le lien de votre dressing et retirez les favoris des autres dressings.\n"
             f"💗 Cette session compte bien **+1 PP**.\n"
+            f"⏰ Fin à *{end.strftime('%H:%M')}*."
+        )
+    elif name == "✖️ Multiplicateur x2":
+        text = (
+            "@everyone\n"
+            "✖️ **SESSION MULTIPLICATEUR ×2**\n"
+            "💗 Chaque participation validée rapporte **+2 PP au lieu de +1 PP** !\n"
+            "🚫 **Aucun bonus n'est autorisé** pendant cette session : 🎁 🎀 👑 💎 🎂\n"
             f"⏰ Fin à *{end.strftime('%H:%M')}*."
         )
     else:
@@ -789,6 +799,34 @@ async def participation(msg):
                             f"🎀 {msg.author.mention} le Méga a déjà atteint 10 participantes : "
                             "tu gagnes **+1 🎀 lien sans rendre**."
                         )
+        return
+
+    # Session Multiplicateur ×2 : aucun bonus, un seul lien normal = +2 PP.
+    if session["name"] == "✖️ Multiplicateur x2":
+        if any(has_bonus_marker(content, marker) for marker in ("🎁", "🎀", "👑", "💎", "🎂")):
+            try:
+                await msg.author.send(
+                    "🚫 **Session Multiplicateur ×2** : les bonus 🎁 🎀 👑 💎 🎂 sont interdits pendant cette session. "
+                    "Envoie uniquement ton lien normal pour gagner +2 PP."
+                )
+            except Exception:
+                pass
+            await temp_message(
+                msg.channel,
+                f"🚫 {msg.author.mention} les bonus sont interdits pendant la Session Multiplicateur ×2."
+            )
+            return
+
+        session["links"][msg.id] = uid
+        if uid not in session["normal"]:
+            session["normal"].add(uid)
+            session["participants"].add(uid)
+            current = await award_pp(msg.author)
+            current = await award_pp(msg.author)
+            await temp_message(
+                msg.channel,
+                f"✖️ {msg.author.mention} **+2 PP** — tu es maintenant à *{current}/6 PP* cette semaine."
+            )
         return
 
     async with data_lock:
