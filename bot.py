@@ -182,6 +182,7 @@ FIXED = [
     ("🚀 Méga Boost", time(14, 0), time(14, 30), "mega"),
     ("🍹 Apéro", time(18, 30), time(19, 0), "normal"),
     ("🍽️ Repas", time(19, 0), time(19, 30), "normal"),
+    ("💔 Retrait de favoris", time(20, 50), time(21, 0), "normal"),
     ("🚀 Méga Boost", time(21, 0), time(21, 30), "mega"),
 ]
 
@@ -190,6 +191,15 @@ FREE_SESSIONS = [
     "🔗 2 liens",
     "👗 Dressing",
     "👗 Article",
+    "🛍️ Lot et offre",
+    "☀️ Printemps/Été",
+    "🍂 Automne/Hiver",
+    "🧸 Enfants",
+    "🌈 Couleurs",
+    "💄 Bijoux / Makeup & Accessoires",
+    "👗 Femme",
+    "👔 Homme",
+    "⚠️ Retrait d'un avertissement",
 ]
 
 SESSION_IMAGES = {
@@ -202,6 +212,16 @@ SESSION_IMAGES = {
     "🔗 2 liens": ("2 LIENS.jpg", "STOP 2 LIENS.jpg"),
     "👗 Dressing": ("DRESSING.jpg", "STOP DRESSING.jpg"),
     "👗 Article": ("SESSION ARTICLE.jpg", "STOP SESSION ARTICLES.jpg"),
+    "🛍️ Lot et offre": ("IMG_9593.jpeg", "IMG_9594.jpeg"),
+    "☀️ Printemps/Été": ("IMG_9591.jpeg", "IMG_9592.jpeg"),
+    "🍂 Automne/Hiver": ("IMG_9589.jpeg", "IMG_9590.jpeg"),
+    "🧸 Enfants": ("IMG_9587.jpeg", "IMG_9588.jpeg"),
+    "🌈 Couleurs": ("IMG_9585.jpeg", "IMG_9586.jpeg"),
+    "💄 Bijoux / Makeup & Accessoires": ("IMG_9603.jpeg", "IMG_9604.jpeg"),
+    "👗 Femme": ("IMG_9601.jpeg", "IMG_9602.jpeg"),
+    "👔 Homme": ("IMG_9599.jpeg", "IMG_9600.jpeg"),
+    "⚠️ Retrait d'un avertissement": ("IMG_9597.jpeg", "IMG_9598.jpeg"),
+    "💔 Retrait de favoris": ("IMG_9595.jpeg", "IMG_9596.jpeg"),
 }
 
 session = None
@@ -273,6 +293,7 @@ async def begin_session(name, start, end, kind, is_free=False):
             return
 
     dressing_count = random.randint(3, 10) if name == "👗 Dressing" else None
+    lot_count = random.randint(2, 10) if name == "🛍️ Lot et offre" else None
 
     session = {
         "name": name,
@@ -283,6 +304,7 @@ async def begin_session(name, start, end, kind, is_free=False):
         "normal": set(),
         "participants": set(),
         "dressing_count": dressing_count,
+        "lot_count": lot_count,
         "links": {},
         "no_return_links": set(),
         "mega_10_unlocked": False,
@@ -313,6 +335,20 @@ async def begin_session(name, start, end, kind, is_free=False):
         text = (
             f"🔗 **SESSION 2 LIENS**\n"
             f"Vous pouvez envoyer *2 liens*.\n"
+            f"⏰ Fin à *{end.strftime('%H:%M')}*."
+        )
+    elif name == "🛍️ Lot et offre":
+        text = (
+            f"🛍️ **SESSION LOT ET OFFRE**\n"
+            f"Lady a choisi un lot de **{lot_count} articles**.\n"
+            f"Créez un lot de {lot_count} articles chez les autres participantes et faites une offre.\n"
+            f"⏰ Fin à *{end.strftime('%H:%M')}*."
+        )
+    elif name == "💔 Retrait de favoris":
+        text = (
+            f"💔 **SESSION RETRAIT DE FAVORIS**\n"
+            f"Posez le lien de votre dressing et retirez les favoris des autres dressings.\n"
+            f"💗 Cette session compte bien **+1 PP**.\n"
             f"⏰ Fin à *{end.strftime('%H:%M')}*."
         )
     else:
@@ -486,8 +522,31 @@ async def finish_session():
         f"👥 *{len(participants)} participante(s)*."
     )
 
-    # Contrôle des rendus uniquement sur les sessions normales.
-    if old["kind"] != "mega":
+    # Session spéciale : chaque participante gagne son PP normalement et,
+    # si elle possède au moins un avertissement, Lady lui en retire 1 à la fin.
+    if old["name"] == "⚠️ Retrait d'un avertissement" and participants:
+        removed_lines = []
+        async with data_lock:
+            for uid in participants:
+                m = md(uid)
+                before = int(m.get("warnings", 0))
+                if before > 0:
+                    m["warnings"] = before - 1
+                    member = channel.guild.get_member(uid)
+                    mention = member.mention if member else f"<@{uid}>"
+                    removed_lines.append(
+                        f"{mention} → **-1 avertissement** ({m['warnings']}/3)"
+                    )
+            save()
+        if removed_lines:
+            await channel.send(
+                "⚠️ **Retrait d'avertissement :**\n" + "\n".join(removed_lines)
+            )
+
+    # Contrôle des rendus sur les sessions normales, sauf Retrait de favoris :
+    # cette session consiste justement à retirer des favoris et ne doit pas
+    # déclencher le contrôle habituel des réactions.
+    if old["kind"] != "mega" and old["name"] != "💔 Retrait de favoris":
         asyncio.create_task(return_check_after_10_minutes(old, channel))
 
     if old["kind"] == "mega" and participants:
