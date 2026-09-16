@@ -1653,23 +1653,32 @@ async def lien_ajouter(ctx, member: discord.Member, nombre: int = 1):
 
 
 @bot.command()
-async def troc(ctx, member: discord.Member):
+async def troc(ctx, member: discord.Member, nombre: int):
     if not admin(ctx):
         return
 
+    if nombre <= 0 or nombre % 6 != 0:
+        await ctx.send("❌ Le nombre de 🎁 à échanger doit être un multiple de **6** (6, 12, 18, 24...).")
+        return
+
+    bows_to_add = nombre // 6
+
     async with data_lock:
         m = md(member.id)
-        if m["gifts"] < 5:
-            await ctx.send(f"🎁 {member.mention} n'a pas assez de cadeaux : **{m['gifts']}/5**.")
+        if m["gifts"] < nombre:
+            await ctx.send(
+                f"🎁 {member.mention} n'a pas assez de cadeaux : "
+                f"**{m['gifts']} 🎁 disponibles**, il en faut **{nombre}**."
+            )
             return
-        m["gifts"] -= 5
-        m["bows"] += 1
+        m["gifts"] -= nombre
+        m["bows"] += bows_to_add
         gifts_left = m["gifts"]
         bows = m["bows"]
         save()
 
     await ctx.send(
-        f"🎀 {member.mention} : **5 🎁 → 1 🎀**. "
+        f"🎀 {member.mention} : **{nombre} 🎁 → {bows_to_add} 🎀**. "
         f"Il reste **{gifts_left} 🎁** et **{bows} 🎀**."
     )
 
