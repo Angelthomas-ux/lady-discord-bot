@@ -298,6 +298,7 @@ async def begin_session(name, start, end, kind, is_free=False):
 
     dressing_count = random.randint(3, 10) if name == "👗 Dressing" else None
     lot_count = random.randint(2, 10) if name == "🛍️ Lot et offre" else None
+    chosen_color = random.choice(["rose", "rouge", "bleu", "vert", "jaune", "orange", "violet", "noir", "blanc", "beige", "gris", "marron"]) if name == "🌈 Couleurs" else None
 
     session = {
         "name": name,
@@ -346,6 +347,12 @@ async def begin_session(name, start, end, kind, is_free=False):
             f"🛍️ **SESSION LOT ET OFFRE**\n"
             f"Lady a choisi un lot de **{lot_count} articles**.\n"
             f"Créez un lot de {lot_count} articles chez les autres participantes et faites une offre.\n"
+            f"⏰ Fin à *{end.strftime('%H:%M')}*."
+        )
+    elif name == "🌈 Couleurs":
+        text = (
+            f"🌈 **SESSION COULEURS**\n"
+            f"Lady a choisi la couleur : **{chosen_color.upper()}** 🎨\n"
             f"⏰ Fin à *{end.strftime('%H:%M')}*."
         )
     elif name == "💔 Retrait de favoris":
@@ -1593,6 +1600,41 @@ QUIZ_THEMES = {
 
 
 
+QUIZ_A_CONTRE_SENS = [
+("Comment s'appelle l'héroïne principale d'À contre-sens ?", ["noah"]),
+("Comment s'appelle le personnage masculin principal ?", ["nick","nick leister","nicholas leister"]),
+("Quel est le titre original espagnol d'À contre-sens ?", ["culpa mia","culpa mía"]),
+("Quel acteur joue Nick ?", ["gabriel guevara"]),
+("Quelle actrice joue Noah ?", ["nicole wallace"]),
+("Dans quel pays se déroule principalement l'histoire ?", ["espagne","en espagne"]),
+("Sur quelle plateforme est sorti À contre-sens ?", ["prime video","amazon prime video","amazon prime","prime"]),
+("Comment s'appelle la mère de Noah ?", ["raffaella","rafaella"]),
+("Comment s'appelle le père de Nick ?", ["william","william leister"]),
+("Nick et Noah deviennent-ils demi-frère et demi-sœur par le mariage de leurs parents ?", ["oui"]),
+("Nick participe à quel type de courses clandestines ?", ["courses de voitures","course de voitures","courses automobiles","course automobile"]),
+("Quel personnage est passionné par les voitures et la vitesse ?", ["nick","nick leister"]),
+("Noah sait-elle conduire de façon sportive ?", ["oui"]),
+("Comment s'appelle l'ex-petit ami violent de Noah ?", ["ronnie"]),
+("Qui met Noah en danger à la fin du premier film ?", ["ronnie"]),
+("Nick appartient-il à une famille aisée ?", ["oui"]),
+("Noah accepte-t-elle facilement sa nouvelle vie au début ?", ["non"]),
+("Nick et Noah commencent-ils par bien s'entendre ?", ["non"]),
+("Leur relation commence plutôt par des disputes ou une amitié immédiate ?", ["disputes","des disputes"]),
+("Comment s'appelle la nouvelle amie proche de Noah ?", ["jenna"]),
+("Comment s'appelle l'ami de Nick proche de Noah ?", ["lion","lionel"]),
+("Quelle autrice a écrit les romans dont le film est adapté ?", ["mercedes ron","mercedes rón"]),
+("Quel est le nom de famille de Nick ?", ["leister"]),
+("Quel est le nom de famille de Noah ?", ["morgan"]),
+("En quelle année le premier film est-il sorti ?", ["2023"]),
+("Comment s'intitule la suite en français ?", ["à contre-sens 2","a contre-sens 2","à contre sens 2","a contre sens 2"]),
+("Quel est le titre espagnol du deuxième volet ?", ["culpa tuya"]),
+("Nick et Noah doivent-ils cacher leur relation à leurs parents ?", ["oui"]),
+("Quel couple est au centre de la saga ?", ["nick et noah","noah et nick"]),
+("À contre-sens est-il adapté d'une saga littéraire ?", ["oui"]),
+]
+
+
+
 def normalize_answer(text):
     return re.sub(r"\s+", " ", (text or "").strip().lower())
 
@@ -1619,7 +1661,10 @@ async def run_quiz(start_dt):
         return
 
     async with quiz_lock:
-        theme, bank = random.choice(list(QUIZ_THEMES.items()))
+        if start_dt.date().isoformat() == "2026-09-19" and start_dt.hour == 22 and start_dt.minute == 0:
+            theme, bank = "🎬 À contre-sens ❤️", QUIZ_A_CONTRE_SENS
+        else:
+            theme, bank = random.choice(list(QUIZ_THEMES.items()))
         questions = random.sample(bank, min(30, len(bank)))
         scores = {}
 
