@@ -71,6 +71,7 @@ def fresh_data():
         "sales_monthly": {},
         "monthly_sales_announced": [],
         "group_session_chain": [],
+        "sunday_reminders": [],
     }
 
 
@@ -104,6 +105,7 @@ def load_data():
 
 
 DATA = load_data()
+DATA.setdefault("sunday_reminders", [])
 DATA.setdefault("group_session_chain", [])
 DATA.setdefault("birthdays", {})
 
@@ -1172,6 +1174,53 @@ def is_absent_this_week(uid):
     monday = today - timedelta(days=today.weekday())
     sunday = monday + timedelta(days=6)
     return start <= sunday and end >= monday
+
+
+@tasks.loop(minutes=1)
+async def sunday_reminder_scheduler():
+    n = now()
+    if n.weekday() != 6 or n.hour != 10:
+        return
+    day_key = n.date().isoformat()
+    if day_key in DATA.setdefault("sunday_reminders", []):
+        return
+
+    for guild in bot.guilds:
+        channel = guild.get_channel(SALON_DISCUSSION_ID)
+        if channel is None:
+            continue
+        mentions = [
+            member.mention for member in guild.members
+            if not member.bot
+            and not is_absent_this_week(member.id)
+            and int(md(member.id).get("pp_week", 0)) < 6
+        ]
+        if mentions:
+            chunks, current = [], ""
+            for mention in mentions:
+                if len(current) + len(mention) + 1 > 1500:
+                    chunks.append(current.strip()); current = ""
+                current += mention + " "
+            if current.strip():
+                chunks.append(current.strip())
+            await channel.send(
+                "⚠️ **DERNIER JOUR POUR VALIDER VOTRE SEMAINE !**\n"
+                + chunks[0]
+                + "\nIl ne vous reste plus qu’aujourd’hui pour atteindre vos **6 PP** "
+                  "et valider votre semaine 🌸 Pensez à participer aux sessions de la journée 💗"
+            )
+            for chunk in chunks[1:]:
+                await channel.send(chunk)
+
+    async with data_lock:
+        DATA.setdefault("sunday_reminders", []).append(day_key)
+        DATA["sunday_reminders"] = DATA["sunday_reminders"][-12:]
+        save()
+
+
+@sunday_reminder_scheduler.before_loop
+async def before_sunday_reminder_scheduler():
+    await bot.wait_until_ready()
 
 
 async def weekly_close(guild, closure_date):
@@ -2245,6 +2294,8 @@ async def on_ready():
         scheduler.start()
     if not weekly_scheduler.is_running():
         weekly_scheduler.start()
+    if not sunday_reminder_scheduler.is_running():
+        sunday_reminder_scheduler.start()
     if not monthly_sales_scheduler.is_running():
         monthly_sales_scheduler.start()
     if not quiz_scheduler.is_running():
