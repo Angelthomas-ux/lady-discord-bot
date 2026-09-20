@@ -1232,11 +1232,6 @@ async def weekly_close(guild, closure_date):
             if key in closures:
                 return
 
-            # On marque avant les actions Discord pour empêcher un double passage
-            # après un redémarrage Railway.
-            closures.append(key)
-            DATA["weekly_closures"] = closures[-60:]
-            save()
 
         members_with_data = []
         for member in guild.members:
@@ -1283,8 +1278,8 @@ async def weekly_close(guild, closure_date):
             else:
                 await set_week_roles(member, orange=True)
 
-        # Reset hebdomadaire après calcul des classements et des rôles.
-        # Le record PP reste conservé.
+        # Reset hebdomadaire après calcul des gagnants et des rôles.
+        # Le record PP est conservé.
         async with data_lock:
             for member, _, _ in members_with_data:
                 m = md(member.id)
@@ -1296,11 +1291,17 @@ async def weekly_close(guild, closure_date):
                 m["crown_until"] = None
                 m["diamond_until"] = None
 
-            # Les 🎀 gagnés lors de CETTE clôture restent pour la nouvelle semaine.
+            # Seuls les 🎀 gagnés à cette clôture passent dans la nouvelle semaine.
             for member in pp_winners:
                 md(member.id)["bows"] += 1
             for member in sales_winners:
                 md(member.id)["bows"] += 1
+
+            # La clôture n'est marquée comme faite qu'après les traitements réussis.
+            closures = DATA.setdefault("weekly_closures", [])
+            if key not in closures:
+                closures.append(key)
+            DATA["weekly_closures"] = closures[-60:]
             save()
 
         discussion = bot.get_channel(SALON_DISCUSSION_ID)
@@ -1316,7 +1317,7 @@ async def weekly_close(guild, closure_date):
             except Exception:
                 pass
 
-        print(f"Clôture hebdomadaire terminée pour {key}")
+        print(f"Clôture hebdomadaire terminée pour {key}", flush=True)
 
 
 @tasks.loop(seconds=20)
@@ -1325,6 +1326,7 @@ async def weekly_scheduler():
     if n.weekday() != 6 or not (time(23, 50) <= n.time() < time(23, 59, 59)):
         return
 
+    print(f"Clôture hebdomadaire déclenchée à {n.isoformat()}", flush=True)
     for guild in bot.guilds:
         await weekly_close(guild, n.date())
 
@@ -1414,16 +1416,16 @@ async def on_member_join(member):
     guild = member.guild
 
     discussion = guild.get_channel(SALON_DISCUSSION_ID)
-    if discussion is not None:
+    if discussion:
         try:
             await discussion.send(
                 f"🌸 **Bienvenue parmi nous {member.mention} !** 🌸\n"
-                "Nous sommes heureux de t'accueillir dans le groupe 💕\n"
-                "Pense à prendre connaissance des règles et n'hésite pas à venir discuter avec nous.\n"
+                "Nous sommes heureux de t’accueillir dans le groupe 💕\n"
+                "Pense à prendre connaissance des règles et n’hésite pas à venir discuter avec nous.\n"
                 "✨ Bonne aventure parmi nous !"
             )
         except Exception as exc:
-            print(f"Message de bienvenue impossible pour {member}: {exc}")
+            print(f"Bienvenue impossible pour {member}: {exc}", flush=True)
 
     join_key = f"{guild.id}:{member.id}"
 
@@ -1838,4 +1840,499 @@ async def before_quiz_scheduler():
 
 # ============================================================
 # ANNIVERSAIRES
-# =======================
+# ============================================================
+
+@tasks.loop(minutes=1)
+async def birthday_scheduler():
+    n = now()
+    # Une seule vérification utile au début de la journée ; la clé évite tout doublon.
+    if n.hour != 0 or n.minute > 2:
+        return
+
+    channel = bot.get_channel(SALON_ANNIVERSAIRES_ID)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(SALON_ANNIVERSAIRES_ID)
+        except Exception as exc:
+            print("Salon anniversaires inaccessible :", exc)
+            return
+
+    birthdays = dict(DATA.setdefault("birthdays", {}))
+    for uid, info in birthdays.items():
+        try:
+            day = int(info.get("day"))
+            month = int(info.get("month"))
+        except Exception:
+            continue
+        if day != n.day or month != n.month:
+            continue
+
+        key = f"{n.date().isoformat()}|{uid}"
+        async with data_lock:
+            claims = DATA.setdefault("birthday_claims", [])
+            if key in claims:
+                continue
+            claims.append(key)
+            DATA["birthday_claims"] = claims[-500:]
+            m = md(uid)
+            m["birthday_until"] = (n + timedelta(hours=24)).isoformat()
+            save()
+
+        try:
+            await channel.send(
+                f"@everyone 🎂 **Joyeux anniversaire <@{uid}> !** 🥳\\n"
+                "Ton bonus 🎂 est actif pendant **24 heures** : "
+                "**1 lien supplémentaire par session normale**.\\n"
+                "🚀 Le bonus anniversaire n'est pas utilisable pendant les Méga Boost."
+            )
+        except Exception as exc:
+            print("Message anniversaire impossible :", exc)
+
+
+@birthday_scheduler.before_loop
+async def before_birthday_scheduler():
+    await bot.wait_until_ready()
+
+
+# ============================================================
+# STATS
+# ============================================================
+
+async def send_stats(member):
+    m = md(member.id)
+
+    text = (
+        "*TES STATS LADY*** 🌸\n\n"
+        f"💗 Participations :*{m['pp_week']} PP** cette semaine\n"
+        f"🏆 Record : **{m['pp_record']} PP**\n"
+        f"⚠️ Avertissements : **{m['warnings']}/3**\n"
+        f"🎁 Cadeaux : **{m['gifts']}**\n"
+        f"🎀 Nœuds : **{m['bows']}**\n"
+        f"👑 Couronne : **{remaining(m.get('crown_until'))}**\n"
+        f"💎 Diamant : **{remaining(m.get('diamond_until'))}**\n"
+        f"🎂 Anniversaire : **{remaining(m.get('birthday_until'))}**\n"
+        f"🛍️ Ventes semaine : **{m['sales_week']}**\n\n"
+        f"🌷 Semaine : "
+        f"*{'VALIDÉE ✅' if m['pp_week'] >= 6 else 'À FAIRE 🌸'}*"
+    )
+
+    try:
+        await member.send(text)
+    except discord.Forbidden:
+        pass
+
+# ============================================================
+# COMMANDES ADMIN
+# ============================================================
+
+def admin(ctx):
+    return bool(ctx.guild and is_lady_admin(ctx.author))
+
+
+@bot.command(name="pp_ajouter")
+async def pp_ajouter(ctx, member: discord.Member, nombre: int = 1):
+    if not admin(ctx):
+        return
+    if nombre < 1:
+        await ctx.send("❌ Le nombre de PP doit être au moins 1.")
+        return
+
+    current = None
+    for _ in range(nombre):
+        current = await award_pp(member)
+
+    await ctx.send(
+        f"💗 {member.mention} : **+{nombre} PP** ajouté{'s' if nombre > 1 else ''} manuellement. "
+        f"Total cette semaine : **{current} PP**."
+    )
+
+
+@bot.command(name="lien_ajouter")
+async def lien_ajouter(ctx, member: discord.Member, nombre: int = 1):
+    if not admin(ctx):
+        return
+    if nombre < 1:
+        await ctx.send("❌ Le nombre de liens sans rendre doit être au moins 1.")
+        return
+
+    async with data_lock:
+        m = md(member.id)
+        m["bows"] += nombre
+        bows = m["bows"]
+        save()
+
+    await ctx.send(
+        f"🎀 {member.mention} : **+{nombre} lien{'s' if nombre > 1 else ''} sans rendre**. "
+        f"Total : **{bows} 🎀**."
+    )
+
+
+@bot.command()
+async def troc(ctx, member: discord.Member, nombre: int):
+    # Commande disponible uniquement dans le salon Troc.
+    if not ctx.guild or ctx.channel.id != SALON_TROC_ID:
+        return
+    if not is_lady_admin(ctx.author):
+        return
+
+    if nombre <= 0 or nombre % 6 != 0:
+        await ctx.send("❌ Le nombre de 🎁 à échanger doit être un multiple de **6** (6, 12, 18, 24...).")
+        return
+
+    bows_to_add = nombre // 6
+
+    async with data_lock:
+        m = md(member.id)
+        if m["gifts"] < nombre:
+            await ctx.send(
+                f"🎁 {member.mention} n'a pas assez de cadeaux : "
+                f"**{m['gifts']} 🎁 disponibles**, il en faut **{nombre}**."
+            )
+            return
+        m["gifts"] -= nombre
+        m["bows"] += bows_to_add
+        gifts_left = m["gifts"]
+        bows = m["bows"]
+        save()
+
+    await ctx.send(
+        f"🎀 {member.mention} : **{nombre} 🎁 → {bows_to_add} 🎀**. "
+        f"Il reste **{gifts_left} 🎁** et **{bows} 🎀**."
+    )
+
+
+@bot.command(name="avertissement_enlever")
+async def avertissement_enlever(ctx, member: discord.Member):
+    if not admin(ctx):
+        return
+
+    async with data_lock:
+        m = md(member.id)
+        before = int(m.get("warnings", 0))
+        m["warnings"] = max(0, before - 1)
+        warnings = m["warnings"]
+        save()
+
+    await ctx.send(
+        f"⚠️ {member.mention} : **-1 avertissement**. "
+        f"Il/elle est maintenant à **{warnings}/3**."
+    )
+
+
+def parse_birthday_date(value):
+    value = (value or "").strip()
+    for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%d/%m", "%d-%m"):
+        try:
+            d = datetime.strptime(value, fmt)
+            return d.day, d.month
+        except ValueError:
+            pass
+    return None
+
+
+@bot.command(name="anniversaire")
+async def anniversaire(ctx, member: discord.Member, date_anniversaire: str):
+    if not admin(ctx):
+        return
+    parsed = parse_birthday_date(date_anniversaire)
+    if not parsed:
+        await ctx.send("🎂 Format attendu : `lady_anniversaire @membre JJ/MM`.")
+        return
+    day, month = parsed
+    async with data_lock:
+        DATA.setdefault("birthdays", {})[str(member.id)] = {"day": day, "month": month}
+        save()
+    await ctx.send(f"🎂 Anniversaire de {member.mention} enregistré au **{day:02d}/{month:02d}**.")
+
+
+@bot.command(name="anniversaire_enlever")
+async def anniversaire_enlever(ctx, member: discord.Member):
+    if not admin(ctx):
+        return
+    async with data_lock:
+        existed = DATA.setdefault("birthdays", {}).pop(str(member.id), None)
+        md(member.id)["birthday_until"] = None
+        save()
+    if existed:
+        await ctx.send(f"🎂 Anniversaire de {member.mention} supprimé.")
+    else:
+        await ctx.send(f"🎂 Aucun anniversaire enregistré pour {member.mention}.")
+
+
+@bot.command(name="anniversaires")
+async def anniversaires(ctx):
+    if not admin(ctx):
+        return
+    birthdays = DATA.setdefault("birthdays", {})
+    if not birthdays:
+        await ctx.send("🎂 Aucun anniversaire enregistré.")
+        return
+    rows = []
+    for uid, info in birthdays.items():
+        rows.append((int(info.get("month", 0)), int(info.get("day", 0)), uid))
+    rows.sort()
+    text = ["🎂 **Anniversaires enregistrés**"]
+    for month, day, uid in rows:
+        text.append(f"<@{uid}> — **{day:02d}/{month:02d}**")
+    await ctx.send("\\n".join(text))
+
+
+@bot.command()
+async def absence(ctx, member: discord.Member, debut: str, fin: str):
+    if not admin(ctx):
+        return
+
+    async with data_lock:
+        DATA.setdefault("absences", {})[str(member.id)] = {"debut": debut, "fin": fin}
+        save()
+
+    await ctx.send(f"💌 Absence enregistrée pour {member.mention}.")
+
+
+@bot.command()
+async def absences(ctx):
+    if not admin(ctx):
+        return
+
+    abs_data = DATA.setdefault("absences", {})
+    if not abs_data:
+        await ctx.send("💌 Aucune absence enregistrée.")
+        return
+
+    lines = []
+    for uid, info in abs_data.items():
+        lines.append(f"<@{uid}> : **{info.get('debut', '?')} → {info.get('fin', '?')}**")
+
+    await ctx.send("💌 **Absences enregistrées**\n" + "\n".join(lines))
+
+# ============================================================
+# EVENEMENTS
+# ============================================================
+
+@bot.event
+async def on_message(msg):
+    if msg.author.bot:
+        return
+
+    if (msg.content or "").strip().lower() == "lady_stat":
+        await send_stats(msg.author)
+        return
+
+    # Dans le salon Anniversaires, chaque membre peut simplement écrire sa date
+    # (ex. 25/08 ou "25/08/1992"). Lady l'enregistre automatiquement.
+    if msg.channel.id == SALON_ANNIVERSAIRES_ID:
+        content = (msg.content or "").strip()
+        match = re.search(r"(?<!\d)([0-3]?\d)[/-]([01]?\d)(?:[/-]\d{2,4})?(?!\d)", content)
+        if match:
+            try:
+                day = int(match.group(1))
+                month = int(match.group(2))
+                # Validation réelle de la date (année bissextile pour accepter 29/02).
+                datetime(2024, month, day)
+            except ValueError:
+                await temp_message(msg.channel, f"🎂 {msg.author.mention} cette date n'est pas valide.")
+                return
+
+            async with data_lock:
+                DATA.setdefault("birthdays", {})[str(msg.author.id)] = {
+                    "day": day,
+                    "month": month,
+                }
+                save()
+
+            await msg.channel.send(
+                f"🎂 {msg.author.mention}, ton anniversaire du **{day:02d}/{month:02d}** "
+                "est bien enregistré !"
+            )
+            return
+
+    if msg.channel.id == SALON_VENTES_ID and msg.attachments:
+        await sale(msg)
+
+    if (
+        msg.channel.id == SALON_GROUPE_SESSION_ID
+        and VINTED.search(msg.content or "")
+    ):
+        await group_session_post(msg)
+        try:
+            await msg.edit(suppress=True)
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+        return
+
+    if (
+        msg.channel.id == SALON_SESSIONS_ID
+        and session
+        and VINTED.search(msg.content or "")
+    ):
+        await participation(msg)
+
+        try:
+            await msg.edit(suppress=True)
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+    await bot.process_commands(msg)
+
+
+
+async def recover_stop_after_restart():
+    info = DATA.get("active_session")
+    if not isinstance(info, dict):
+        return
+    name = info.get("name")
+    end = parse_dt(info.get("end"))
+    if not name or not end or end > now():
+        return
+    channel = bot.get_channel(SALON_SESSIONS_ID)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(SALON_SESSIONS_ID)
+        except Exception:
+            return
+    stop_img = SESSION_IMAGES.get(name, (None, None))[1]
+    if stop_img:
+        await send_image(channel, stop_img)
+    async with data_lock:
+        DATA.pop("active_session", None)
+        save()
+
+
+# ============================================================
+# CORRECTIF UNIQUE DU 13/09/2026 — REMISE À ZÉRO DES BONUS
+# Conserve uniquement les 🎀 gagnés lors de la clôture qui vient d'avoir lieu.
+# Le message de clôture dans le salon discussion permet de retrouver les gagnantes :
+# 1 🎀 pour meilleure participation + 1 🎀 pour meilleure vente (cumul possible).
+# ============================================================
+
+async def cleanup_bonus_once_2026_09_13():
+    cleanup_key = "bonus_cleanup_2026-09-13_done"
+
+    async with data_lock:
+        if DATA.get(cleanup_key):
+            return
+
+    discussion = bot.get_channel(SALON_DISCUSSION_ID)
+    if discussion is None:
+        try:
+            discussion = await bot.fetch_channel(SALON_DISCUSSION_ID)
+        except Exception as exc:
+            print("Correctif bonus : salon discussion inaccessible :", exc)
+            return
+
+    fresh_bows = {}
+    closure_message_found = False
+
+    try:
+        async for message in discussion.history(limit=100):
+            if message.author.id != bot.user.id:
+                continue
+            content = message.content or ""
+            if "Mise à jour hebdomadaire Lady terminée" not in content:
+                continue
+
+            closure_message_found = True
+
+            for line in content.splitlines():
+                if "Meilleure(s) participation(s)" in line or "Meilleure(s) vendeuse(s)" in line:
+                    for member in message.mentions:
+                        if member.mention in line:
+                            fresh_bows[member.id] = fresh_bows.get(member.id, 0) + 1
+            break
+    except Exception as exc:
+        print("Correctif bonus : lecture du message de clôture impossible :", exc)
+        return
+
+    # Sécurité : on ne touche pas aux nœuds si le message de clôture n'a pas été retrouvé.
+    if not closure_message_found:
+        print("Correctif bonus : message de clôture introuvable, aucun reset effectué.")
+        return
+
+    async with data_lock:
+        for member in bot.get_all_members():
+            if member.bot:
+                continue
+            m = md(member.id)
+
+            # Tous les anciens bonus repartent à zéro.
+            m["gifts"] = 0
+            m["crown_until"] = None
+            m["diamond_until"] = None
+
+            # Les seuls nœuds conservés sont ceux gagnés à la clôture de ce soir.
+            # Une même personne peut en conserver 2 si elle a gagné les deux classements.
+            m["bows"] = fresh_bows.get(member.id, 0)
+
+        DATA[cleanup_key] = True
+        save()
+
+    print("Correctif bonus du 13/09/2026 appliqué une seule fois.")
+
+
+
+async def fix_new_week_green_roles_once():
+    key = "fix_green_roles_2026-09-14_done"
+    async with data_lock:
+        if DATA.get(key):
+            return
+
+    changed = 0
+    for guild in bot.guilds:
+        green_role = discord.utils.get(guild.roles, name="✅ À JOUR")
+        pink_role = discord.utils.get(guild.roles, name="🌸 SEMAINE À FAIRE")
+        if green_role is None or pink_role is None:
+            continue
+
+        for member in guild.members:
+            if member.bot:
+                continue
+            m = md(member.id)
+            if int(m.get("pp_week", 0)) == 0 and green_role in member.roles:
+                try:
+                    await member.remove_roles(green_role, reason="Lady : nouvelle semaine")
+                    await member.add_roles(pink_role, reason="Lady : nouvelle semaine")
+                    changed += 1
+                except Exception as exc:
+                    print(f"Rôle nouvelle semaine impossible pour {member}: {exc}")
+
+    async with data_lock:
+        DATA[key] = True
+        save()
+    print(f"Correction nouvelle semaine : {changed} membre(s) vert -> rose.")
+
+
+@bot.event
+async def on_ready():
+    print(f"Lady connectée : {bot.user} ({bot.user.id})", flush=True)
+    print(f"Fichier de données : {DATA_FILE}", flush=True)
+
+    await recover_stop_after_restart()
+    await cleanup_bonus_once_2026_09_13()
+    await fix_new_week_green_roles_once()
+
+    # Démarrage immédiat des fonctions principales.
+    if not scheduler.is_running():
+        scheduler.start()
+    if not weekly_scheduler.is_running():
+        weekly_scheduler.start()
+    if not sunday_reminder_scheduler.is_running():
+        sunday_reminder_scheduler.start()
+    if not monthly_sales_scheduler.is_running():
+        monthly_sales_scheduler.start()
+    if not quiz_scheduler.is_running():
+        quiz_scheduler.start()
+    if not birthday_scheduler.is_running():
+        birthday_scheduler.start()
+
+    # Parrainage initialisé ensuite pour ne jamais bloquer les sessions/PP.
+    for guild in bot.guilds:
+        try:
+            await refresh_invites(guild)
+        except Exception as exc:
+            print("Initialisation invitations impossible:", exc)
+
+# ============================================================
+# LANCEMENT
+# ============================================================
+
+bot.run(TOKEN)
