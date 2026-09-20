@@ -1145,13 +1145,11 @@ async def sale(msg):
 # CLÔTURE HEBDOMADAIRE — DIMANCHE 23H50
 # ============================================================
 
-def is_absent_this_week(uid):
+def is_absent_for_week(uid, sunday_date):
     info = DATA.setdefault("absences", {}).get(str(uid))
     if not info:
         return False
 
-    # Les anciennes commandes acceptaient des dates libres : si on ne peut pas
-    # les parser proprement, on considère l'absence enregistrée comme valable.
     def parse_day(value):
         if not value:
             return None
@@ -1159,7 +1157,7 @@ def is_absent_this_week(uid):
             try:
                 d = datetime.strptime(value, fmt)
                 if fmt == "%d/%m":
-                    d = d.replace(year=now().year)
+                    d = d.replace(year=sunday_date.year)
                 return d.date()
             except Exception:
                 pass
@@ -1170,10 +1168,14 @@ def is_absent_this_week(uid):
     if not start or not end:
         return True
 
+    monday = sunday_date - timedelta(days=6)
+    return start <= sunday_date and end >= monday
+
+
+def is_absent_this_week(uid):
     today = now().date()
-    monday = today - timedelta(days=today.weekday())
-    sunday = monday + timedelta(days=6)
-    return start <= sunday and end >= monday
+    sunday = today + timedelta(days=(6 - today.weekday()))
+    return is_absent_for_week(uid, sunday)
 
 
 @tasks.loop(minutes=1)
@@ -1266,7 +1268,7 @@ async def weekly_close(guild, closure_date):
             monday = datetime.combine(closure_date - timedelta(days=6), time(0, 0), tzinfo=TIMEZONE)
             new_this_week = bool(joined and joined >= monday)
 
-            if is_absent_this_week(member.id) or new_this_week:
+            if is_absent_for_week(member.id, closure_date) or new_this_week:
                 await set_week_roles(member, rose=True)
                 continue
 
@@ -2301,6 +2303,26 @@ async def fix_new_week_green_roles_once():
     print(f"Correction nouvelle semaine : {changed} membre(s) vert -> rose.")
 
 
+async def catch_up_missed_weekly_close():
+    n = now()
+    if n.weekday() != 0:
+        return
+
+    missed_sunday = n.date() - timedelta(days=1)
+    key = missed_sunday.isoformat()
+
+    async with data_lock:
+        already_done = key in DATA.setdefault("weekly_closures", [])
+
+    if already_done:
+        print(f"Rattrapage inutile : clôture {key} déjà effectuée.", flush=True)
+        return
+
+    print(f"Rattrapage automatique de la clôture du {key}...", flush=True)
+    for guild in bot.guilds:
+        await weekly_close(guild, missed_sunday)
+
+
 @bot.event
 async def on_ready():
     print(f"Lady connectée : {bot.user} ({bot.user.id})", flush=True)
@@ -2309,6 +2331,7 @@ async def on_ready():
     await recover_stop_after_restart()
     await cleanup_bonus_once_2026_09_13()
     await fix_new_week_green_roles_once()
+    await catch_up_missed_weekly_close()
 
     # Démarrage immédiat des fonctions principales.
     if not scheduler.is_running():
