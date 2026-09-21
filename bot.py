@@ -1049,14 +1049,16 @@ async def group_session_post(msg):
         )
         return
 
-    if not required_ids:
-        # Première personne de la chaîne : rien à rendre au-dessus, donc +1 PP directement.
-        await validate_group_session_entry(entry, msg.channel)
-    else:
+    # Vérifie immédiatement les retours déjà faits AVANT l'envoi du lien.
+    # C'est indispensable dans le salon sans session : les membres font normalement
+    # les liens au-dessus puis postent leur propre lien.
+    validated_now = await validate_group_session_entry(entry, msg.channel)
+
+    if required_ids and not validated_now:
         await temp_message(
             msg.channel,
             f"🔗 {msg.author.mention} ton passage est enregistré. "
-            f"Fais les **{len(required_ids)} lien(s) juste au-dessus** : "
+            f"Il te reste à faire les **{len(required_ids)} lien(s) juste au-dessus** : "
             "Lady validera automatiquement ton **+1 PP** dès que tu seras à jour."
         )
 
