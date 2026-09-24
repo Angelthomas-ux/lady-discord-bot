@@ -24,6 +24,7 @@ SALON_ANNIVERSAIRES_ID = 1541680943583068200
 SALON_GROUPE_SESSION_ID = 1549453941367111690
 SALON_TROC_ID = 1549331152601489448
 SALON_ADMIN_ID = 1541683049320681523
+SALON_INSCRIPTION_ID = 1552667396274389023
 
 ROLE_ROSE = "🌸 SEMAINE À FAIRE"
 ROLE_VERT = "✅ À JOUR"
@@ -72,6 +73,7 @@ def fresh_data():
         "monthly_sales_announced": [],
         "group_session_chain": [],
         "sunday_reminders": [],
+        "registrations": {},
     }
 
 
@@ -97,6 +99,7 @@ def load_data():
         raw.setdefault("sales_monthly", {})
         raw.setdefault("monthly_sales_announced", [])
         raw.setdefault("group_session_chain", [])
+        raw.setdefault("registrations", {})
         return raw
 
     except Exception as exc:
@@ -108,6 +111,7 @@ DATA = load_data()
 DATA.setdefault("sunday_reminders", [])
 DATA.setdefault("group_session_chain", [])
 DATA.setdefault("birthdays", {})
+DATA.setdefault("registrations", {})
 
 
 def save():
@@ -1400,6 +1404,111 @@ async def before_monthly_sales_scheduler():
     await bot.wait_until_ready()
 
 
+
+# ============================================================
+# INSCRIPTION — FICHE AUTOMATIQUE DES NOUVEAUX MEMBRES
+# ============================================================
+
+def parse_registration_birthday(value):
+    value = (value or "").strip()
+    match = re.fullmatch(r"([0-3]?\\d)[/-]([01]?\\d)(?:[/-]\\d{2,4})?", value)
+    if not match:
+        return None
+    try:
+        day, month = int(match.group(1)), int(match.group(2))
+        datetime(2024, month, day)
+        return day, month
+    except ValueError:
+        return None
+
+
+class RegistrationModal(discord.ui.Modal, title="Ma fiche d'inscription"):
+    first_name = discord.ui.TextInput(label="Prénom", placeholder="Ex. Morgane", max_length=50)
+    vinted_name = discord.ui.TextInput(label="Pseudo Vinted", placeholder="Ex. morgane59", max_length=100)
+    birthday = discord.ui.TextInput(label="Date d'anniversaire", placeholder="JJ/MM — ex. 17/12", max_length=10)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        parsed = parse_registration_birthday(str(self.birthday))
+        if not parsed:
+            await interaction.response.send_message(
+                "🎂 Date invalide. Écris-la au format **JJ/MM** (ex. 17/12).",
+                ephemeral=True,
+            )
+            return
+
+        day, month = parsed
+        uid = str(interaction.user.id)
+
+        async with data_lock:
+            registrations = DATA.setdefault("registrations", {})
+            if uid in registrations:
+                await interaction.response.send_message(
+                    "🌸 Ta fiche est déjà enregistrée. Pour la corriger, demande à un admin.",
+                    ephemeral=True,
+                )
+                return
+
+            registrations[uid] = {
+                "first_name": str(self.first_name).strip(),
+                "vinted_name": str(self.vinted_name).strip(),
+                "birthday": f"{day:02d}/{month:02d}",
+                "registered_at": now().isoformat(),
+            }
+            DATA.setdefault("birthdays", {})[uid] = {"day": day, "month": month}
+            save()
+
+        await interaction.response.send_message(
+            f"✅ **Fiche enregistrée !**\\n"
+            f"🌸 Prénom : **{str(self.first_name).strip()}**\\n"
+            f"👗 Vinted : **{str(self.vinted_name).strip()}**\\n"
+            f"🎂 Anniversaire : **{day:02d}/{month:02d}**",
+            ephemeral=True,
+        )
+
+
+class RegistrationView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Remplir ma fiche",
+        style=discord.ButtonStyle.primary,
+        custom_id="lady_registration_fill",
+    )
+    async def fill_registration(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if str(interaction.user.id) in DATA.setdefault("registrations", {}):
+            await interaction.response.send_message(
+                "🌸 Ta fiche est déjà enregistrée. Pour la corriger, demande à un admin.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_modal(RegistrationModal())
+
+
+async def send_registration_card(member):
+    channel = member.guild.get_channel(SALON_INSCRIPTION_ID)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(SALON_INSCRIPTION_ID)
+        except Exception as exc:
+            print(f"Salon inscription inaccessible : {exc}", flush=True)
+            return
+
+    embed = discord.Embed(
+        title="Fiche d'inscription",
+        description=(
+            f"Bienvenue {member.mention} !\\n\\n"
+            "Pour entrer dans le groupe, appuie sur le bouton ci-dessous et complète ta fiche.\\n\\n"
+            "Lady enregistrera ton **prénom**, ton **pseudo Vinted** et ta **date d'anniversaire**. "
+            "Le jour J, ton bonus anniversaire 🎂 sera activé automatiquement."
+        ),
+    )
+    try:
+        await channel.send(embed=embed, view=RegistrationView())
+    except Exception as exc:
+        print(f"Fiche inscription impossible pour {member}: {exc}", flush=True)
+
+
 # ============================================================
 # PARRAINAGE — +1 🎀 PAR NOUVELLE ARRIVÉE
 # ============================================================
@@ -1418,6 +1527,8 @@ async def refresh_invites(guild):
 @bot.event
 async def on_member_join(member):
     guild = member.guild
+
+    await send_registration_card(member)
 
     discussion = guild.get_channel(SALON_DISCUSSION_ID)
     if discussion:
@@ -2109,6 +2220,34 @@ async def absences(ctx):
 
     await ctx.send("💌 **Absences enregistrées**\n" + "\n".join(lines))
 
+
+@bot.command(name="fiche_modifier")
+async def fiche_modifier(ctx, member: discord.Member, prenom: str, pseudo_vinted: str, anniversaire: str):
+    if not admin(ctx):
+        return
+    parsed = parse_registration_birthday(anniversaire)
+    if not parsed:
+        await ctx.send("❌ Date invalide. Exemple : `lady_fiche_modifier @membre Prénom PseudoVinted 17/12`")
+        return
+    day, month = parsed
+    uid = str(member.id)
+    async with data_lock:
+        old = DATA.setdefault("registrations", {}).get(uid, {})
+        DATA["registrations"][uid] = {
+            "first_name": prenom.strip(),
+            "vinted_name": pseudo_vinted.strip(),
+            "birthday": f"{day:02d}/{month:02d}",
+            "registered_at": old.get("registered_at", now().isoformat()),
+            "updated_at": now().isoformat(),
+        }
+        DATA.setdefault("birthdays", {})[uid] = {"day": day, "month": month}
+        save()
+    await ctx.send(
+        f"✅ Fiche de {member.mention} mise à jour : **{prenom}** — "
+        f"Vinted **{pseudo_vinted}** — 🎂 **{day:02d}/{month:02d}**."
+    )
+
+
 # ============================================================
 # EVENEMENTS
 # ============================================================
@@ -2330,6 +2469,8 @@ async def on_ready():
     print(f"Lady connectée : {bot.user} ({bot.user.id})", flush=True)
     print(f"Fichier de données : {DATA_FILE}", flush=True)
 
+    bot.add_view(RegistrationView())
+
     await recover_stop_after_restart()
     await cleanup_bonus_once_2026_09_13()
     await fix_new_week_green_roles_once()
@@ -2358,6 +2499,4 @@ async def on_ready():
 
 # ============================================================
 # LANCEMENT
-# ============================================================
-
-bot.run(TOKEN)
+# ===================================
