@@ -3,6 +3,8 @@ import json
 import random
 import asyncio
 import re
+import unicodedata
+import traceback
 from datetime import datetime, timedelta, time, date
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -30,6 +32,7 @@ ROLE_ROSE = "🌸 SEMAINE À FAIRE"
 ROLE_VERT = "✅ À JOUR"
 ROLE_ORANGE = "Semaine non validée"
 ROLE_ROUGE = "Supprimer"
+ROLE_SANS_SESSION = "🔓 BOOST SANS SESSION"
 
 DATA_DIR = Path(os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", "/app/data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -74,6 +77,9 @@ def fresh_data():
         "group_session_chain": [],
         "sunday_reminders": [],
         "registrations": {},
+        "quiz_question_history": [],
+        "red_kick_notices": [],
+        "red_kick_runs": [],
     }
 
 
@@ -112,6 +118,9 @@ DATA.setdefault("sunday_reminders", [])
 DATA.setdefault("group_session_chain", [])
 DATA.setdefault("birthdays", {})
 DATA.setdefault("registrations", {})
+DATA.setdefault("quiz_question_history", [])
+DATA.setdefault("red_kick_notices", [])
+DATA.setdefault("red_kick_runs", [])
 
 
 def save():
@@ -744,12 +753,63 @@ async def set_week_roles(member, rose=False, green=False, orange=False, red=Fals
             print(f"Erreur rôle {role_name} pour {member}: {exc}")
 
 
+def registered_first_week(member, at=None):
+    at = at or now()
+    if not member.joined_at or str(member.id) not in DATA.get("registrations", {}):
+        return False
+    joined = member.joined_at.astimezone(TIMEZONE)
+    monday = datetime.combine(at.date() - timedelta(days=at.weekday()), time.min, tzinfo=TIMEZONE)
+    return monday <= joined < monday + timedelta(days=7)
+
+
+async def sync_group_access(member):
+    """Accès au salon seulement après 6 vrais PP dans la semaine."""
+    if member.bot:
+        return
+    role = discord.utils.get(member.guild.roles, name=ROLE_SANS_SESSION)
+    if not role:
+        return
+    eligible = int(md(member.id).get("pp_week", 0)) >= 6
+    try:
+        if eligible and role not in member.roles:
+            await member.add_roles(role, reason="Lady : 6 PP atteints")
+        elif not eligible and role in member.roles:
+            await member.remove_roles(role, reason="Lady : moins de 6 PP")
+    except (discord.Forbidden, discord.HTTPException) as exc:
+        print(f"Accès sans session impossible pour {member}: {exc}")
+
+
+async def configure_group_access(guild):
+    """Verrouille le salon par rôle sans effacer les autres permissions existantes."""
+    channel = guild.get_channel(SALON_GROUPE_SESSION_ID)
+    if channel is None:
+        return
+    try:
+        role = discord.utils.get(guild.roles, name=ROLE_SANS_SESSION)
+        if role is None:
+            role = await guild.create_role(name=ROLE_SANS_SESSION, reason="Lady : accès 6 PP")
+        everyone = channel.overwrites_for(guild.default_role)
+        everyone.view_channel = False
+        await channel.set_permissions(guild.default_role, overwrite=everyone,
+                                      reason="Lady : sans session réservé aux 6 PP")
+        allowed = channel.overwrites_for(role)
+        allowed.view_channel = True
+        allowed.send_messages = True
+        allowed.read_message_history = True
+        await channel.set_permissions(role, overwrite=allowed,
+                                      reason="Lady : accès 6 PP")
+        for member in guild.members:
+            await sync_group_access(member)
+    except (discord.Forbidden, discord.HTTPException) as exc:
+        print("Configuration du salon sans session impossible:", exc)
+
+
 async def update_week_role(member):
     if not isinstance(member, discord.Member):
         return
 
     m = md(member.id)
-    if m["pp_week"] >= 6:
+    if m["pp_week"] >= 6 or registered_first_week(member):
         # À 6 PP, on force réellement le passage en vert pour tout le monde.
         await set_week_roles(member, green=True)
     else:
@@ -781,6 +841,7 @@ async def award_pp(member):
         save()
 
     await update_week_role(member)
+    await sync_group_access(member)
     return current
 
 
@@ -1002,6 +1063,21 @@ async def validate_group_session_entry(entry, channel):
 
 
 async def group_session_post(msg):
+    # Condition réelle : 6 PP gagnés pendant la semaine en cours.
+    # Le rôle vert offert à l'inscription ne donne pas accès au sans-session.
+    if int(md(msg.author.id).get("pp_week", 0)) < 6:
+        try:
+            await msg.delete()
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+        try:
+            await msg.author.send(
+                "🔒 Le boost sans session est réservé aux membres ayant **6 PP "
+                "cette semaine**. Participe d'abord aux sessions Lady 💗"
+            )
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+        return
     uid = msg.author.id
     content = msg.content or ""
 
@@ -1202,6 +1278,7 @@ async def sunday_reminder_scheduler():
             if not member.bot
             and not is_absent_this_week(member.id)
             and int(md(member.id).get("pp_week", 0)) < 6
+            and not registered_first_week(member, n)
         ]
         if mentions:
             chunks, current = [], ""
@@ -1286,6 +1363,28 @@ async def weekly_close(guild, closure_date):
             else:
                 await set_week_roles(member, orange=True)
 
+        # Préavis public du dimanche pour les membres actuellement rouges.
+        red_role = discord.utils.get(guild.roles, name=ROLE_ROUGE)
+        red_members = [m for m in guild.members if not m.bot and not is_lady_admin(m)
+                       and red_role and red_role in m.roles]
+        discussion = guild.get_channel(SALON_DISCUSSION_ID)
+        notice_key = f"{guild.id}|{key}"
+        if discussion and red_members and notice_key not in DATA.setdefault("red_kick_notices", []):
+            header = ("🔴 **AVIS DE SUPPRESSION — LUNDI MATIN**\n"
+                      "Les membres ci-dessous sont en rouge après deux semaines non validées. "
+                      "Ils seront retirés du serveur **lundi matin** si leur rôle rouge n'est pas retiré :\n")
+            mentions = [m.mention for m in red_members]
+            try:
+                await discussion.send(header + " ".join(mentions[:35]))
+                for index in range(35, len(mentions), 35):
+                    await discussion.send(" ".join(mentions[index:index + 35]))
+                async with data_lock:
+                    DATA.setdefault("red_kick_notices", []).append(notice_key)
+                    DATA["red_kick_notices"] = DATA["red_kick_notices"][-90:]
+                    save()
+            except Exception as exc:
+                print("Annonce rouges impossible:", exc)
+
         # Reset hebdomadaire après calcul des gagnants et des rôles.
         # Le record PP est conservé.
         async with data_lock:
@@ -1311,6 +1410,9 @@ async def weekly_close(guild, closure_date):
                 closures.append(key)
             DATA["weekly_closures"] = closures[-60:]
             save()
+
+        for member, _, _ in members_with_data:
+            await sync_group_access(member)
 
         discussion = bot.get_channel(SALON_DISCUSSION_ID)
         if discussion:
@@ -1342,6 +1444,49 @@ async def weekly_scheduler():
 @weekly_scheduler.before_loop
 async def before_weekly_scheduler():
     await bot.wait_until_ready()
+
+@tasks.loop(minutes=1)
+async def monday_red_kick_scheduler():
+    n = now()
+    if n.weekday() != 0 or n.time() < time(8, 0):
+        return
+    sunday_key = (n.date() - timedelta(days=1)).isoformat()
+    for guild in bot.guilds:
+        key = f"{guild.id}|{sunday_key}"
+        if key not in DATA.setdefault("red_kick_notices", []):
+            continue
+        if key in DATA.setdefault("red_kick_runs", []):
+            continue
+        red_role = discord.utils.get(guild.roles, name=ROLE_ROUGE)
+        if not red_role:
+            continue
+        failed = False
+        for member in list(guild.members):
+            if member.bot or is_lady_admin(member) or red_role not in member.roles:
+                continue
+            if member.id == guild.owner_id or member.guild_permissions.administrator:
+                continue
+            if guild.me and member.top_role >= guild.me.top_role:
+                print(f"Expulsion impossible (hiérarchie): {member}")
+                failed = True
+                continue
+            try:
+                await member.kick(reason="Lady : 2 semaines non validées, préavis dimanche")
+                await asyncio.sleep(1)
+            except (discord.Forbidden, discord.HTTPException) as exc:
+                print(f"Expulsion impossible {member}: {exc}")
+                failed = True
+        if not failed:
+            async with data_lock:
+                DATA.setdefault("red_kick_runs", []).append(key)
+                DATA["red_kick_runs"] = DATA["red_kick_runs"][-90:]
+                save()
+
+
+@monday_red_kick_scheduler.before_loop
+async def before_monday_red_kick_scheduler():
+    await bot.wait_until_ready()
+
 
 # ============================================================
 # BILAN MENSUEL DES VENTES
@@ -1411,7 +1556,7 @@ async def before_monthly_sales_scheduler():
 
 def parse_registration_birthday(value):
     value = (value or "").strip()
-    match = re.fullmatch(r"([0-3]?\\d)[/-]([01]?\\d)(?:[/-]\\d{2,4})?", value)
+    match = re.fullmatch(r"([0-3]?\d)/([01]?\d)", value)
     if not match:
         return None
     try:
@@ -1456,6 +1601,9 @@ class RegistrationModal(discord.ui.Modal, title="Ma fiche d'inscription"):
             }
             DATA.setdefault("birthdays", {})[uid] = {"day": day, "month": month}
             save()
+
+        if isinstance(interaction.user, discord.Member) and registered_first_week(interaction.user):
+            await set_week_roles(interaction.user, green=True)
 
         await interaction.response.send_message(
             f"✅ **Fiche enregistrée !**\\n"
@@ -1785,6 +1933,212 @@ QUIZ_THEMES = {
 
 
 
+
+# Thèmes supplémentaires — questions simples, réponses contrôlées.
+EXTRA_QUIZ = {
+"🐾 Animaux": """Quel animal miaule ?|chat
+Quel animal aboie ?|chien
+Quel animal hennit ?|cheval
+Quel animal meugle ?|vache
+Quel animal bêle ?|mouton
+Quel animal grogne et vit souvent dans la forêt ?|sanglier
+Quel animal porte sa maison sur son dos ?|escargot
+Quel oiseau est connu pour imiter la parole ?|perroquet
+Quel animal a une trompe ?|éléphant
+Quel mammifère vole grâce à ses ailes ?|chauve souris
+Quel animal fabrique du miel ?|abeille
+Quel animal produit de la soie ?|ver a soie
+Quel animal vit dans une ruche ?|abeille
+Quel animal est surnommé le roi de la jungle ?|lion
+Quel animal a des rayures noires et blanches ?|zèbre
+Quel animal possède un très long cou ?|girafe
+Quel animal saute avec une poche ventrale ?|kangourou
+Quel animal est célèbre pour ses barrages ?|castor
+Quel animal a huit bras et vit dans la mer ?|pieuvre
+Quel animal marin possède une carapace et des pinces ?|crabe
+Quel insecte devient papillon après la chenille ?|papillon
+Quel animal pond des œufs et caquette ?|poule
+Quel animal est le petit de la vache ?|veau
+Quel animal est le petit du cheval ?|poulain
+Quel animal est le petit du mouton ?|agneau
+Quel animal est le petit de la chèvre ?|chevreau
+Quel animal est le petit du cochon ?|porcelet
+Quel animal est le petit du chien ?|chiot
+Quel animal est le petit du chat ?|chaton
+Quel animal est le petit de la poule ?|poussin
+Quel animal est le petit du lion ?|lionceau
+Quel animal est le petit du cerf ?|faon
+Quel animal a un bec plat et nage dans les mares ?|canard
+Quel animal est connu pour changer de couleur ?|caméléon
+Quel animal est le plus rapide sur terre en course ?|guépard""",
+"🌍 Géographie": """Quelle est la capitale de l'Italie ?|rome
+Quelle est la capitale de la Suisse ?|berne
+Quelle est la capitale de l'Autriche ?|vienne
+Quelle est la capitale de la Norvège ?|oslo
+Quelle est la capitale de la Suède ?|stockholm
+Quelle est la capitale du Danemark ?|copenhague
+Quelle est la capitale de la Finlande ?|helsinki
+Quelle est la capitale de l'Irlande ?|dublin
+Quelle est la capitale de la Pologne ?|varsovie
+Quelle est la capitale de la République tchèque ?|prague
+Quelle est la capitale de la Hongrie ?|budapest
+Quelle est la capitale de la Croatie ?|zagreb
+Quelle est la capitale de la Roumanie ?|bucarest
+Quelle est la capitale de la Bulgarie ?|sofia
+Quelle est la capitale de la Turquie ?|ankara
+Quelle est la capitale du Maroc ?|rabat
+Quelle est la capitale de l'Algérie ?|alger
+Quelle est la capitale de la Tunisie ?|tunis
+Quelle est la capitale de l'Égypte ?|le caire
+Quelle est la capitale du Sénégal ?|dakar
+Quelle est la capitale du Kenya ?|nairobi
+Quelle est la capitale du Japon ?|tokyo
+Quelle est la capitale de la Chine ?|pékin
+Quelle est la capitale de l'Inde ?|new delhi
+Quelle est la capitale de la Thaïlande ?|bangkok
+Quelle est la capitale du Vietnam ?|hanoï
+Quelle est la capitale de la Corée du Sud ?|séoul
+Quelle est la capitale du Canada ?|ottawa
+Quelle est la capitale des États-Unis ?|washington
+Quelle est la capitale du Mexique ?|mexico
+Quelle est la capitale du Brésil ?|brasilia
+Quelle est la capitale de l'Argentine ?|buenos aires
+Quelle est la capitale du Chili ?|santiago
+Quelle est la capitale de l'Australie ?|canberra
+Quelle est la capitale de la Nouvelle-Zélande ?|wellington""",
+"🍳 Cuisine": """Quel fruit sert à préparer du guacamole ?|avocat
+Quel légume est orange et pousse sous terre ?|carotte
+Quel fruit est utilisé dans la tarte Tatin classique ?|pomme
+Quel ingrédient principal compose une omelette ?|œuf
+Quel ingrédient principal compose une purée classique ?|pomme de terre
+Quel produit laitier sert à faire du beurre ?|crème
+Quelle céréale sert principalement à fabriquer du pain blanc ?|blé
+Quelle pâte italienne a une forme de tube ?|penne
+Quelle pâte italienne a la forme de longs fils ?|spaghetti
+Quel fromage est utilisé traditionnellement sur une pizza margherita ?|mozzarella
+Quelle herbe aromatique est utilisée dans le pesto vert traditionnel ?|basilic
+Quel fruit jaune est souvent pressé sur le poisson ?|citron
+Quel fruit tropical porte une couronne de feuilles ?|ananas
+Quel fruit est rouge et porte de petites graines à l'extérieur ?|fraise
+Quel fruit est généralement séché pour devenir un pruneau ?|prune
+Quel fruit devient un raisin sec après séchage ?|raisin
+Quel légume vert ressemble à un petit arbre ?|brocoli
+Quel légume est souvent utilisé pour faire des frites ?|pomme de terre
+Quel aliment est fabriqué avec des fèves de cacao ?|chocolat
+Quelle boisson chaude est préparée avec des feuilles infusées ?|thé
+Quelle boisson chaude est préparée avec des grains torréfiés ?|café
+Quel plat italien est composé de couches de pâtes et de sauce ?|lasagnes
+Quel dessert français est une pâte fine cuite à la poêle ?|crêpe
+Quel dessert italien contient du café et du mascarpone ?|tiramisu
+Quel ingrédient fait lever la pâte à pain traditionnelle ?|levure
+Quel ustensile sert à égoutter les pâtes ?|passoire
+Quel ustensile sert à retourner une crêpe ?|spatule
+Quel ustensile sert à fouetter des œufs ?|fouet
+Quel appareil sert à cuire des gaufres ?|gaufrier
+Quel fruit est à la base d'une compote de pommes ?|pomme
+Quel légume est à la base d'une soupe de potiron ?|potiron
+Quel fruit est l'ingrédient principal d'une limonade au citron ?|citron
+Quel ingrédient principal sert à faire du pop-corn ?|maïs
+Quel ingrédient sert à sucrer naturellement le miel ?|nectar
+Quel aliment est obtenu en faisant cailler du lait ?|fromage""",
+"🔬 Sciences & nature": """Quelle étoile éclaire la Terre ?|soleil
+Quel astre tourne autour de la Terre ?|lune
+Quelle planète est connue pour ses anneaux ?|saturne
+Quelle planète est la plus grande du système solaire ?|jupiter
+Combien de planètes compte le système solaire ?|8
+Quel organe permet principalement de respirer ?|poumons
+Quel organe permet de voir ?|œil
+Quel organe permet d'entendre ?|oreille
+Quel organe filtre le sang et produit l'urine ?|rein
+Quel organe permet de penser ?|cerveau
+Combien de jambes a un être humain ?|2
+Combien de bras a un être humain ?|2
+Combien de doigts a une main humaine typique ?|5
+Combien de dents de lait a généralement un enfant ?|20
+Quel liquide circule dans nos veines ?|sang
+Quelle partie de la plante absorbe l'eau du sol ?|racines
+Quelle partie d'une fleur contient souvent le pollen ?|étamine
+Quel phénomène transforme l'eau en vapeur ?|évaporation
+Quel phénomène transforme la vapeur d'eau en liquide ?|condensation
+À quelle température l'eau pure gèle-t-elle environ en degrés Celsius ?|0
+À quelle température l'eau bout-elle environ au niveau de la mer en degrés Celsius ?|100
+Quel gaz les plantes absorbent-elles pour la photosynthèse ?|dioxyde de carbone
+Quel gaz les plantes libèrent-elles pendant la photosynthèse ?|oxygène
+Quelle force nous maintient au sol ?|gravité
+Quel métal est attiré par un aimant classique ?|fer
+Quel instrument mesure la température ?|thermomètre
+Quel instrument mesure la pression atmosphérique ?|baromètre
+Quel instrument permet de voir les étoiles de plus près ?|télescope
+Quel instrument permet d'observer les cellules ?|microscope
+Quelle saison précède l'été ?|printemps
+Quelle saison précède l'hiver ?|automne
+Comment appelle-t-on l'eau tombant des nuages sous forme liquide ?|pluie
+Comment appelle-t-on l'eau gelée qui tombe des nuages en flocons ?|neige
+Comment appelle-t-on un éclair accompagné d'un bruit de tonnerre ?|orage
+Quelle couleur du feu de circulation signifie arrêt ?|rouge""",
+"⚽ Sports": """Combien de joueurs une équipe de football aligne-t-elle au départ sur le terrain ?|11
+Quel sport se joue avec une raquette et un volant ?|badminton
+Quel sport se joue avec une raquette et une balle jaune ?|tennis
+Quel sport utilise un panier placé en hauteur ?|basketball
+Quel sport se pratique dans une piscine avec des longueurs ?|natation
+Quel sport utilise un ballon ovale ?|rugby
+Quel sport utilise un cheval et des obstacles ?|équitation
+Quel sport se pratique avec des skis sur la neige ?|ski
+Quel sport se pratique sur une planche à roulettes ?|skateboard
+Quel sport se pratique avec un vélo ?|cyclisme
+Quel sport utilise des gants et un ring ?|boxe
+Quel sport utilise un kimono et des prises ?|judo
+Quel sport utilise un arc et des flèches ?|tir à l arc
+Quel sport se pratique sur une patinoire avec un palet ?|hockey sur glace
+Quel sport consiste à courir un marathon ?|athlétisme
+Quelle est la distance officielle d'un marathon en kilomètres environ ?|42,195
+Combien de sets gagnants faut-il généralement dans un match de tennis féminin en Grand Chelem ?|2
+Quel sport est associé au Tour de France ?|cyclisme
+Quel sport est associé à Roland-Garros ?|tennis
+Quel sport est associé au tournoi de Wimbledon ?|tennis
+Quel sport est associé à la Coupe du monde FIFA ?|football
+Quel sport est associé à la NBA ?|basketball
+Quel sport est associé à la Formule 1 ?|automobile
+Quel sport est associé au Tournoi des Six Nations ?|rugby
+Quel sport est associé au Super Bowl ?|football américain
+Quel sport est associé au maillot jaune ?|cyclisme
+Quel sport utilise une piste avec des haies ?|athlétisme
+Quel sport utilise une poutre et des barres asymétriques ?|gymnastique
+Quel sport utilise une balle et des clubs sur un parcours ?|golf
+Quel sport se joue sur une table avec une petite balle et deux raquettes ?|tennis de table
+Quel sport utilise une boule et des quilles ?|bowling
+Quel sport consiste à soulever des poids au-dessus de la tête ?|haltérophilie
+Quel sport utilise un filet et six joueurs par équipe sur le terrain ?|volleyball
+Quel sport se joue avec des pierres sur la glace et des balais ?|curling
+Quel sport se pratique avec un masque et un fleuret ?|escrime""",
+}
+for theme, raw in EXTRA_QUIZ.items():
+    bank = []
+    for row in raw.splitlines():
+        q, answer = row.split("|", 1)
+        bank.append((q, [answer]))
+    QUIZ_THEMES[theme] = bank
+
+# Cinq séries de calculs simples, sans ambiguïté, pour renouveler les jeux.
+for group in range(5):
+    name = ["➕ Additions", "➖ Soustractions", "✖️ Multiplications", "➗ Divisions", "🧮 Calcul mental"][group]
+    bank = []
+    for i in range(35):
+        a = 12 + i * 3
+        b = 2 + (i % 11)
+        if group == 0:
+            q, answer = f"Combien font {a} + {b} ?", a + b
+        elif group == 1:
+            q, answer = f"Combien font {a} - {b} ?", a - b
+        elif group == 2:
+            q, answer = f"Combien font {b} × {2 + i % 9} ?", b * (2 + i % 9)
+        elif group == 3:
+            q, answer = f"Combien font {b * (3 + i)} ÷ {b} ?", 3 + i
+        else:
+            q, answer = f"Quel est le double de {a + b} ?", 2 * (a + b)
+        bank.append((q, [str(answer)]))
+    QUIZ_THEMES[name] = bank
+
 QUIZ_A_CONTRE_SENS = [
 ("Comment s'appelle l'héroïne principale d'À contre-sens ?", ["noah"]),
 ("Comment s'appelle le personnage masculin principal ?", ["nick","nick leister","nicholas leister"]),
@@ -1821,7 +2175,9 @@ QUIZ_A_CONTRE_SENS = [
 
 
 def normalize_answer(text):
-    return re.sub(r"\s+", " ", (text or "").strip().lower())
+    text = unicodedata.normalize("NFD", (text or "").lower())
+    text = "".join(c for c in text if unicodedata.category(c) != "Mn")
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", text)).strip()
 
 
 def quiz_overlaps_mega(start_dt):
@@ -1849,8 +2205,25 @@ async def run_quiz(start_dt):
         if start_dt.date().isoformat() == "2026-09-19" and start_dt.hour == 22 and start_dt.minute == 0:
             theme, bank = "🎬 À contre-sens ❤️", QUIZ_A_CONTRE_SENS
         else:
-            theme, bank = random.choice(list(QUIZ_THEMES.items()))
+            # Aucun retour d'une question avant épuisement des thèmes disponibles.
+            history = set(DATA.setdefault("quiz_question_history", []))
+            eligible = [
+                (name, [(q, a) for q, a in bank if f"{name}|{q}" not in history])
+                for name, bank in QUIZ_THEMES.items()
+            ]
+            eligible = [(name, unused) for name, unused in eligible if len(unused) >= 30]
+            if not eligible:
+                async with data_lock:
+                    DATA["quiz_question_history"] = []
+                    save()
+                eligible = list(QUIZ_THEMES.items())
+            theme, bank = random.choice(eligible)
         questions = random.sample(bank, min(30, len(bank)))
+        if theme in QUIZ_THEMES:
+            async with data_lock:
+                history = DATA.setdefault("quiz_question_history", [])
+                history.extend(f"{theme}|{question}" for question, _ in questions)
+                save()
         scores = {}
 
         await channel.send(
@@ -1874,7 +2247,7 @@ async def run_quiz(start_dt):
             try:
                 winner_msg = await bot.wait_for("message", timeout=30, check=check)
             except asyncio.TimeoutError:
-                await channel.send("⏱️ Temps écoulé !")
+                await channel.send(f"⏱️ Temps écoulé ! Personne n’a trouvé.\n✅ **Bonne réponse : {answers[0]}**")
                 continue
 
             scores[winner_msg.author.id] = scores.get(winner_msg.author.id, 0) + 1
@@ -2469,7 +2842,18 @@ async def on_ready():
     print(f"Lady connectée : {bot.user} ({bot.user.id})", flush=True)
     print(f"Fichier de données : {DATA_FILE}", flush=True)
 
-    bot.add_view(RegistrationView())
+    if not getattr(bot, "_lady_registration_view_added", False):
+        bot.add_view(RegistrationView())
+        bot._lady_registration_view_added = True
+
+    # Répare les inscriptions de cette semaine qui n'avaient pas reçu le vert.
+    for guild in bot.guilds:
+        for member in guild.members:
+            if not member.bot and registered_first_week(member):
+                await set_week_roles(member, green=True)
+
+    for guild in bot.guilds:
+        await configure_group_access(guild)
 
     await recover_stop_after_restart()
     await cleanup_bonus_once_2026_09_13()
@@ -2489,6 +2873,8 @@ async def on_ready():
         quiz_scheduler.start()
     if not birthday_scheduler.is_running():
         birthday_scheduler.start()
+    if not monday_red_kick_scheduler.is_running():
+        monday_red_kick_scheduler.start()
 
     # Parrainage initialisé ensuite pour ne jamais bloquer les sessions/PP.
     for guild in bot.guilds:
