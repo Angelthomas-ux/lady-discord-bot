@@ -75,6 +75,7 @@ def fresh_data():
         "sales_monthly": {},
         "monthly_sales_announced": [],
         "group_session_chain": [],
+        "group_session_access": {},
         "sunday_reminders": [],
         "registrations": {},
         "quiz_question_history": [],
@@ -105,6 +106,7 @@ def load_data():
         raw.setdefault("sales_monthly", {})
         raw.setdefault("monthly_sales_announced", [])
         raw.setdefault("group_session_chain", [])
+        raw.setdefault("group_session_access", {})
         raw.setdefault("registrations", {})
         return raw
 
@@ -116,6 +118,7 @@ def load_data():
 DATA = load_data()
 DATA.setdefault("sunday_reminders", [])
 DATA.setdefault("group_session_chain", [])
+DATA.setdefault("group_session_access", {})
 DATA.setdefault("birthdays", {})
 DATA.setdefault("registrations", {})
 DATA.setdefault("quiz_question_history", [])
@@ -762,19 +765,63 @@ def registered_first_week(member, at=None):
     return monday <= joined < monday + timedelta(days=7)
 
 
+def group_access_state(user_id):
+    """
+    Calcule les droits du Boost sans session.
+    - 6 PP de sessions classiques = 3 liens
+    - puis +6 PP classiques = 3 nouveaux liens
+    Les PP gagnés DANS le sans-session ne servent pas à débloquer le palier suivant.
+    """
+    uid = str(user_id)
+    state = DATA.setdefault("group_session_access", {}).setdefault(
+        uid, {"links_used": 0, "group_pp_earned": 0}
+    )
+    total_pp = int(md(user_id).get("pp_week", 0))
+    group_pp = max(0, int(state.get("group_pp_earned", 0)))
+    classic_pp = max(0, total_pp - group_pp)
+    used = max(0, int(state.get("links_used", 0)))
+
+    # Chaque bloc de 6 PP de sessions classiques donne exactement 3 passages :
+    # 6 PP => 3 liens, 12 PP => 3 nouveaux, 18 PP => 3 nouveaux, etc.
+    allowed_links = 3 * (classic_pp // 6)
+
+    remaining = max(0, allowed_links - used)
+    next_unlock = 6 * ((classic_pp // 6) + 1)
+    return state, classic_pp, used, allowed_links, remaining, next_unlock
+
+
 async def sync_group_access(member):
-    """Accès au salon seulement après 6 vrais PP dans la semaine."""
+    """Ajoute/retire le rôle selon le nombre de liens sans-session encore disponibles."""
     if member.bot:
         return
     role = discord.utils.get(member.guild.roles, name=ROLE_SANS_SESSION)
     if not role:
         return
-    eligible = int(md(member.id).get("pp_week", 0)) >= 6
+    _, _, _, _, remaining, _ = group_access_state(member.id)
+    eligible = remaining > 0
     try:
         if eligible and role not in member.roles:
-            await member.add_roles(role, reason="Lady : 6 PP atteints")
+            await member.add_roles(role, reason="Lady : liens sans session débloqués")
+            try:
+                _, classic_pp, _, _, remaining, _ = group_access_state(member.id)
+                await member.send(
+                    f"🔓 **Boost sans session débloqué !** Tu as atteint **{classic_pp} PP de sessions**. "
+                    f"Tu peux faire **{remaining} passage(s)** dans le sans-session. 💗"
+                )
+            except (discord.Forbidden, discord.HTTPException):
+                pass
         elif not eligible and role in member.roles:
-            await member.remove_roles(role, reason="Lady : moins de 6 PP")
+            await member.remove_roles(role, reason="Lady : quota sans session utilisé")
+            try:
+                _, classic_pp, _, _, _, next_unlock = group_access_state(member.id)
+                if classic_pp >= 6:
+                    await member.send(
+                        f"🔒 **Tes 3 passages dans le Boost sans session sont utilisés.** "
+                        f"Il faut maintenant refaire **6 sessions** et atteindre **{next_unlock} PP de sessions** "
+                        "pour débloquer 3 nouveaux passages. 💗"
+                    )
+            except (discord.Forbidden, discord.HTTPException):
+                pass
     except (discord.Forbidden, discord.HTTPException) as exc:
         print(f"Accès sans session impossible pour {member}: {exc}")
 
@@ -1054,6 +1101,14 @@ async def validate_group_session_entry(entry, channel):
         save()
 
     current = await award_pp(member)
+    async with data_lock:
+        access = DATA.setdefault("group_session_access", {}).setdefault(
+            str(member.id), {"links_used": 0, "group_pp_earned": 0}
+        )
+        access["group_pp_earned"] = int(access.get("group_pp_earned", 0)) + 1
+        save()
+    # Le +1 PP gagné ici compte dans les stats, mais pas pour débloquer le palier suivant.
+    await sync_group_access(member)
     await temp_message(
         channel,
         f"💗 {member.mention} **participation validée ! +1 PP** — "
@@ -1063,20 +1118,24 @@ async def validate_group_session_entry(entry, channel):
 
 
 async def group_session_post(msg):
-    # Condition réelle : 6 PP gagnés pendant la semaine en cours.
-    # Le rôle vert offert à l'inscription ne donne pas accès au sans-session.
-    if int(md(msg.author.id).get("pp_week", 0)) < 6:
+    # Paliers du sans-session : 6 PP classiques = 3 liens, puis +6 PP classiques
+    # pour 3 nouveaux liens. Les PP gagnés ici ne débloquent pas le palier suivant.
+    state, classic_pp, used, allowed_links, remaining, next_unlock = group_access_state(msg.author.id)
+    if remaining <= 0:
         try:
             await msg.delete()
         except (discord.Forbidden, discord.HTTPException):
             pass
         try:
-            await msg.author.send(
-                "🔒 Le boost sans session est réservé aux membres ayant **6 PP "
-                "cette semaine**. Participe d'abord aux sessions Lady 💗"
-            )
+            if classic_pp < 6:
+                info = f"tu es à **{classic_pp}/6 PP de sessions classiques**"
+            else:
+                info = (f"tes **{allowed_links} lien(s)** disponibles ont été utilisés. "
+                        f"Il te faut **{next_unlock} PP de sessions classiques** pour débloquer 3 nouveaux liens")
+            await msg.author.send(f"🔒 Boost sans session bloqué : {info}. 💗")
         except (discord.Forbidden, discord.HTTPException):
             pass
+        await sync_group_access(msg.author)
         return
     uid = msg.author.id
     content = msg.content or ""
@@ -1112,6 +1171,10 @@ async def group_session_post(msg):
             }
             chain.append(entry)
             DATA["group_session_chain"] = chain[-1000:]
+            access = DATA.setdefault("group_session_access", {}).setdefault(
+                str(uid), {"links_used": 0, "group_pp_earned": 0}
+            )
+            access["links_used"] = int(access.get("links_used", 0)) + 1
             save()
         else:
             required_ids = []
@@ -1128,6 +1191,9 @@ async def group_session_post(msg):
             "aient posté après ton dernier lien avant de pouvoir reposter."
         )
         return
+
+    # Le 3e lien d'un palier rebloque immédiatement le salon.
+    await sync_group_access(msg.author)
 
     # Vérifie immédiatement les retours déjà faits AVANT l'envoi du lien.
     # C'est indispensable dans le salon sans session : les membres font normalement
@@ -1397,6 +1463,9 @@ async def weekly_close(guild, closure_date):
                 m["bows"] = 0
                 m["crown_until"] = None
                 m["diamond_until"] = None
+
+            # Nouveau cycle hebdomadaire pour le Boost sans session.
+            DATA["group_session_access"] = {}
 
             # Seuls les 🎀 gagnés à cette clôture passent dans la nouvelle semaine.
             for member in pp_winners:
