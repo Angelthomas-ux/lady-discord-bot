@@ -53,6 +53,15 @@ intents.invites = True
 bot = commands.Bot(command_prefix="lady_", intents=intents, help_command=None)
 
 VINTED = re.compile(r"(?:https?://)?(?:www\.)?vinted\.[^\s/]+/[^\s]+", re.I)
+
+def extract_vinted_url(text):
+    match = VINTED.search(text or "")
+    if not match:
+        return None
+    url = match.group(0).rstrip(".,);]>")
+    if not url.lower().startswith(("http://", "https://")):
+        url = "https://" + url
+    return url
 data_lock = asyncio.Lock()
 session_lock = asyncio.Lock()
 weekly_lock = asyncio.Lock()
@@ -768,9 +777,8 @@ def registered_first_week(member, at=None):
 def group_access_state(user_id):
     """
     Calcule les droits du Boost sans session.
-    - 6 PP de sessions classiques = 3 liens
-    - puis +6 PP classiques = 3 nouveaux liens
-    Les PP gagnés DANS le sans-session ne servent pas à débloquer le palier suivant.
+    - 3 PP gagnés dans les sessions Boost = 1 lien dans le sans-session.
+    - Les PP gagnés dans le sans-session ne débloquent jamais un nouveau lien.
     """
     uid = str(user_id)
     state = DATA.setdefault("group_session_access", {}).setdefault(
@@ -778,47 +786,43 @@ def group_access_state(user_id):
     )
     total_pp = int(md(user_id).get("pp_week", 0))
     group_pp = max(0, int(state.get("group_pp_earned", 0)))
-    classic_pp = max(0, total_pp - group_pp)
+    boost_pp = max(0, total_pp - group_pp)
     used = max(0, int(state.get("links_used", 0)))
 
-    # Chaque bloc de 6 PP de sessions classiques donne exactement 3 passages :
-    # 6 PP => 3 liens, 12 PP => 3 nouveaux, 18 PP => 3 nouveaux, etc.
-    allowed_links = 3 * (classic_pp // 6)
-
+    # 3 participations aux sessions Boost = 1 passage dans le sans-session.
+    allowed_links = boost_pp // 3
     remaining = max(0, allowed_links - used)
-    next_unlock = 6 * ((classic_pp // 6) + 1)
-    return state, classic_pp, used, allowed_links, remaining, next_unlock
+    next_unlock = 3 * (allowed_links + 1)
+    return state, boost_pp, used, allowed_links, remaining, next_unlock
 
 
 async def sync_group_access(member):
-    """Ajoute/retire le rôle selon le nombre de liens sans-session encore disponibles."""
+    """Synchronise le rôle indicatif du sans-session avec les passages disponibles."""
     if member.bot:
         return
     role = discord.utils.get(member.guild.roles, name=ROLE_SANS_SESSION)
     if not role:
         return
-    _, _, _, _, remaining, _ = group_access_state(member.id)
+    _, boost_pp, _, _, remaining, next_unlock = group_access_state(member.id)
     eligible = remaining > 0
     try:
         if eligible and role not in member.roles:
-            await member.add_roles(role, reason="Lady : liens sans session débloqués")
+            await member.add_roles(role, reason="Lady : passage sans session débloqué")
             try:
-                _, classic_pp, _, _, remaining, _ = group_access_state(member.id)
                 await member.send(
-                    f"🔓 **Boost sans session débloqué !** Tu as atteint **{classic_pp} PP de sessions**. "
-                    f"Tu peux faire **{remaining} passage(s)** dans le sans-session. 💗"
+                    f"🔓 **Boost sans session débloqué !** Tu as **{boost_pp} participation(s) aux sessions Boost**. "
+                    f"Tu peux poster **{remaining} lien(s)** dans le sans-session. 💗"
                 )
             except (discord.Forbidden, discord.HTTPException):
                 pass
         elif not eligible and role in member.roles:
-            await member.remove_roles(role, reason="Lady : quota sans session utilisé")
+            await member.remove_roles(role, reason="Lady : passage sans session utilisé")
             try:
-                _, classic_pp, _, _, _, next_unlock = group_access_state(member.id)
-                if classic_pp >= 6:
+                if boost_pp >= 3:
                     await member.send(
-                        f"🔒 **Tes 3 passages dans le Boost sans session sont utilisés.** "
-                        f"Il faut maintenant refaire **6 sessions** et atteindre **{next_unlock} PP de sessions** "
-                        "pour débloquer 3 nouveaux passages. 💗"
+                        f"🔒 **Ton passage dans le Boost sans session est utilisé.** "
+                        f"Il faut atteindre **{next_unlock} participations aux sessions Boost** "
+                        "pour débloquer ton prochain lien. 💗"
                     )
             except (discord.Forbidden, discord.HTTPException):
                 pass
@@ -827,24 +831,27 @@ async def sync_group_access(member):
 
 
 async def configure_group_access(guild):
-    """Verrouille le salon par rôle sans effacer les autres permissions existantes."""
+    """Laisse le salon visible : Lady contrôle elle-même qui a le droit de poster un lien."""
     channel = guild.get_channel(SALON_GROUPE_SESSION_ID)
     if channel is None:
         return
     try:
         role = discord.utils.get(guild.roles, name=ROLE_SANS_SESSION)
         if role is None:
-            role = await guild.create_role(name=ROLE_SANS_SESSION, reason="Lady : accès 6 PP")
+            role = await guild.create_role(name=ROLE_SANS_SESSION, reason="Lady : accès sans session")
+
+        # Tout le monde doit pouvoir voir le salon et réagir aux 3 liens au-dessus,
+        # y compris pendant les 5 minutes qui suivent son propre lien.
         everyone = channel.overwrites_for(guild.default_role)
-        everyone.view_channel = False
-        await channel.set_permissions(guild.default_role, overwrite=everyone,
-                                      reason="Lady : sans session réservé aux 6 PP")
-        allowed = channel.overwrites_for(role)
-        allowed.view_channel = True
-        allowed.send_messages = True
-        allowed.read_message_history = True
-        await channel.set_permissions(role, overwrite=allowed,
-                                      reason="Lady : accès 6 PP")
+        everyone.view_channel = True
+        everyone.send_messages = True
+        everyone.read_message_history = True
+        everyone.add_reactions = True
+        await channel.set_permissions(
+            guild.default_role, overwrite=everyone,
+            reason="Lady : contrôle automatique du sans session"
+        )
+
         for member in guild.members:
             await sync_group_access(member)
     except (discord.Forbidden, discord.HTTPException) as exc:
@@ -907,6 +914,16 @@ async def participation(msg):
     uid = msg.author.id
     content = msg.content or ""
     kind = session["kind"]
+
+    # Quand une membre poste son dressing pendant la session Dressing,
+    # Lady mémorise le lien pour pouvoir le redonner si elle quitte le serveur.
+    if session.get("name") == "👗 Dressing":
+        dressing_url = extract_vinted_url(content)
+        if dressing_url:
+            async with data_lock:
+                reg = DATA.setdefault("registrations", {}).setdefault(str(uid), {})
+                reg["vinted_dressing_url"] = dressing_url
+                save()
 
     if kind == "mega":
         if any(x in content for x in ("🎁", "🎀", "👑", "💎", "🎂")):
@@ -1118,25 +1135,28 @@ async def validate_group_session_entry(entry, channel):
 
 
 async def group_session_post(msg):
-    # Paliers du sans-session : 6 PP classiques = 3 liens, puis +6 PP classiques
-    # pour 3 nouveaux liens. Les PP gagnés ici ne débloquent pas le palier suivant.
-    state, classic_pp, used, allowed_links, remaining, next_unlock = group_access_state(msg.author.id)
+    # Nouvelle règle : 3 participations aux sessions Boost = 1 lien sans-session.
+    state, boost_pp, used, allowed_links, remaining, next_unlock = group_access_state(msg.author.id)
     if remaining <= 0:
         try:
             await msg.delete()
         except (discord.Forbidden, discord.HTTPException):
             pass
         try:
-            if classic_pp < 6:
-                info = f"tu es à **{classic_pp}/6 PP de sessions classiques**"
+            if boost_pp < 3:
+                info = f"tu es à **{boost_pp}/3 participation(s) aux sessions Boost**"
             else:
-                info = (f"tes **{allowed_links} lien(s)** disponibles ont été utilisés. "
-                        f"Il te faut **{next_unlock} PP de sessions classiques** pour débloquer 3 nouveaux liens")
+                info = (
+                    f"ton passage disponible a déjà été utilisé. "
+                    f"Il te faut **{next_unlock} participations aux sessions Boost** "
+                    "pour débloquer ton prochain lien"
+                )
             await msg.author.send(f"🔒 Boost sans session bloqué : {info}. 💗")
         except (discord.Forbidden, discord.HTTPException):
             pass
         await sync_group_access(msg.author)
         return
+
     uid = msg.author.id
     content = msg.content or ""
 
@@ -1162,12 +1182,15 @@ async def group_session_post(msg):
 
         if allowed:
             required_ids = [str(e["message_id"]) for e in last_three]
+            created = now()
             entry = {
                 "message_id": str(msg.id),
                 "user_id": str(uid),
                 "required_message_ids": required_ids,
                 "validated": False,
-                "created_at": now().isoformat(),
+                "warning_given": False,
+                "created_at": created.isoformat(),
+                "warning_deadline": (created + timedelta(minutes=5)).isoformat(),
             }
             chain.append(entry)
             DATA["group_session_chain"] = chain[-1000:]
@@ -1192,20 +1215,17 @@ async def group_session_post(msg):
         )
         return
 
-    # Le 3e lien d'un palier rebloque immédiatement le salon.
     await sync_group_access(msg.author)
 
-    # Vérifie immédiatement les retours déjà faits AVANT l'envoi du lien.
-    # C'est indispensable dans le salon sans session : les membres font normalement
-    # les liens au-dessus puis postent leur propre lien.
+    # Si les 3 liens étaient déjà faits avant de poster, Lady valide tout de suite.
     validated_now = await validate_group_session_entry(entry, msg.channel)
 
     if required_ids and not validated_now:
         await temp_message(
             msg.channel,
-            f"🔗 {msg.author.mention} ton passage est enregistré. "
-            f"Il te reste à faire les **{len(required_ids)} lien(s) juste au-dessus** : "
-            "Lady validera automatiquement ton **+1 PP** dès que tu seras à jour."
+            f"⏱️ {msg.author.mention} ton lien est enregistré. Tu as **5 minutes** "
+            f"pour faire les **{len(required_ids)} lien(s) juste au-dessus**. "
+            "S'il en manque au contrôle de Lady : **+1 avertissement** ⚠️"
         )
 
 
@@ -1217,6 +1237,99 @@ async def check_group_session_pending_for(user_id, channel):
         ]
     for entry in pending:
         await validate_group_session_entry(entry, channel)
+
+
+async def apply_group_session_warning(entry, channel):
+    """Après 5 minutes, ajoute 1 avertissement si les 3 liens au-dessus ne sont pas faits."""
+    if entry.get("validated") or entry.get("warning_given"):
+        return
+
+    deadline = parse_dt(entry.get("warning_deadline"))
+    if deadline is None or now() < deadline:
+        return
+
+    # Dernière vérification au moment exact du contrôle.
+    if await validate_group_session_entry(entry, channel):
+        return
+
+    member = channel.guild.get_member(int(entry.get("user_id", 0))) if channel.guild else None
+    if member is None:
+        return
+
+    async with data_lock:
+        persistent = next(
+            (e for e in group_chain_entries()
+             if str(e.get("message_id")) == str(entry.get("message_id"))),
+            None,
+        )
+        if not persistent or persistent.get("validated") or persistent.get("warning_given"):
+            return
+        persistent["warning_given"] = True
+
+        # Les admins sont contrôlés mais ne prennent pas d'avertissement automatique.
+        if is_lady_admin(member):
+            save()
+            return
+
+        m = md(member.id)
+        m["warnings"] = int(m.get("warnings", 0)) + 1
+        warnings = m["warnings"]
+        save()
+
+    try:
+        await member.send(
+            "⚠️ **Sans session : participation incomplète.**\n"
+            "Tu avais 5 minutes pour faire les **3 liens juste au-dessus du tien**. "
+            f"Il en manque au moins un : **+1 avertissement ({warnings}/3)**."
+        )
+    except (discord.Forbidden, discord.HTTPException):
+        pass
+
+    try:
+        await temp_message(
+            channel,
+            f"⚠️ {member.mention} les 3 liens au-dessus n'ont pas tous été faits dans les 5 minutes : "
+            f"**+1 avertissement ({warnings}/3)**.",
+            seconds=20,
+        )
+    except Exception:
+        pass
+
+    if warnings >= 3:
+        try:
+            await member.timeout(
+                timedelta(hours=24),
+                reason="Lady : 3 avertissements — blocage 24 h"
+            )
+            try:
+                await member.send("⛔ Tu as atteint **3 avertissements** : blocage pendant **24 h**.")
+            except Exception:
+                pass
+        except Exception as exc:
+            print(f"Impossible de timeout {member}: {exc}")
+
+
+@tasks.loop(minutes=1)
+async def group_session_warning_scheduler():
+    for guild in bot.guilds:
+        channel = guild.get_channel(SALON_GROUPE_SESSION_ID)
+        if channel is None:
+            continue
+        async with data_lock:
+            pending = [
+                dict(e) for e in group_chain_entries()
+                if e.get("warning_deadline") and not e.get("validated") and not e.get("warning_given")
+            ]
+        for entry in pending:
+            try:
+                await apply_group_session_warning(entry, channel)
+            except Exception as exc:
+                print("Contrôle 5 minutes sans session impossible:", exc)
+
+
+@group_session_warning_scheduler.before_loop
+async def before_group_session_warning_scheduler():
+    await bot.wait_until_ready()
 
 
 @bot.event
@@ -1724,6 +1837,47 @@ async def send_registration_card(member):
         await channel.send(embed=embed, view=RegistrationView())
     except Exception as exc:
         print(f"Fiche inscription impossible pour {member}: {exc}", flush=True)
+
+
+# ============================================================
+# DÉPART D'UN MEMBRE — RAPPEL RETRAIT DES FAVORIS
+# ============================================================
+
+@bot.event
+async def on_member_remove(member):
+    if member.bot:
+        return
+
+    registration = DATA.setdefault("registrations", {}).get(str(member.id), {})
+    first_name = (registration.get("first_name") or member.display_name or member.name).strip()
+    vinted_name = (registration.get("vinted_name") or "").strip()
+    dressing_url = (registration.get("vinted_dressing_url") or "").strip()
+
+    discussion = member.guild.get_channel(SALON_DISCUSSION_ID)
+    if discussion is None:
+        try:
+            discussion = await bot.fetch_channel(SALON_DISCUSSION_ID)
+        except Exception as exc:
+            print(f"Annonce départ impossible pour {member}: {exc}", flush=True)
+            return
+
+    lines = [
+        "👋 **Départ du groupe**",
+        f"**{first_name}** (`{member.name}`) a quitté le groupe.",
+    ]
+    if dressing_url:
+        lines.append(f"🛍️ **Dressing Vinted :** {dressing_url}")
+    elif vinted_name:
+        lines.append(f"👗 **Pseudo Vinted :** `{vinted_name}`")
+        lines.append("⚠️ Lady n'a pas encore enregistré le lien direct de son dressing.")
+    else:
+        lines.append("⚠️ Aucun dressing Vinted n'était enregistré pour cette membre.")
+    lines.append("❤️ Pensez à retirer ses articles de vos favoris.")
+
+    try:
+        await discussion.send("\n".join(lines))
+    except Exception as exc:
+        print(f"Annonce départ impossible pour {member}: {exc}", flush=True)
 
 
 # ============================================================
@@ -2944,6 +3098,8 @@ async def on_ready():
         birthday_scheduler.start()
     if not monday_red_kick_scheduler.is_running():
         monday_red_kick_scheduler.start()
+    if not group_session_warning_scheduler.is_running():
+        group_session_warning_scheduler.start()
 
     # Parrainage initialisé ensuite pour ne jamais bloquer les sessions/PP.
     for guild in bot.guilds:
